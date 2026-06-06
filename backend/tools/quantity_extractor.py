@@ -34,10 +34,10 @@ def has_order_intent(text: str) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", normalized) for keyword in ORDER_KEYWORDS)
 
 
-def extract_order_quantity(text: str) -> int | None:
+def extract_explicit_order_quantity(text: str) -> int | None:
     normalized = text.lower()
 
-    digit_match = re.search(r"\b(\d{1,2})(?!\s*%)\b", normalized)
+    digit_match = re.search(r"\b(\d{1,4})(?!\s*%)\b", normalized)
     if digit_match:
         quantity = int(digit_match.group(1))
         if quantity > 0:
@@ -46,6 +46,14 @@ def extract_order_quantity(text: str) -> int | None:
     for word, quantity in NUMBER_WORDS.items():
         if re.search(rf"\b{re.escape(word)}\b", normalized):
             return quantity
+
+    return None
+
+
+def extract_order_quantity(text: str) -> int | None:
+    explicit_quantity = extract_explicit_order_quantity(text)
+    if explicit_quantity is not None:
+        return explicit_quantity
 
     if has_order_intent(text):
         return 1

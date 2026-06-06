@@ -546,6 +546,7 @@ Expected behavior:
 - Escalations should show the viewer's raw question, escalation reason, ConciergeAgent drafted reply, and controls for the host to accept, edit and send, or discard the reply.
 - Viewer Q&A events should be recorded for analytics and report generation.
 - The host cockpit's Viewer Room / Host Reply area should show the reply record, including the original viewer question and automatic or host-approved reply when one is sent.
+- Viewer orders must preserve the exact intended quantity from chat text or cart checkout text. Explicit quantities override LLM extraction. Backend order records, stock decrement, host/viewer stock displays, and KPI/GMV reporting must all use the same backend order quantity.
 
 Acceptance criteria:
 

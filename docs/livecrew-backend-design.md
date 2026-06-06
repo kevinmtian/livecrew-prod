@@ -511,6 +511,8 @@ Responsibilities:
 - Resolve SKU from explicit mention first, then the active pinned SKU for contextual product references.
 - Return no proposed actions when a product question cannot be grounded to a SKU.
 - Extract order quantity from natural language.
+- Treat explicit quantities in the raw viewer text as authoritative for order creation, overriding any conflicting LLM-extracted quantity.
+- Default order quantity to 1 only when clear order intent exists and no explicit numeric or number-word quantity is present.
 - Generate grounded product replies from SKU facts and current commerce state.
 - Say that a detail cannot be verified when the requested product detail is not present in grounded SKU facts or current commerce state.
 - Propose `create_order` only when order intent is clear.

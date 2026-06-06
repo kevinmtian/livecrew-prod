@@ -8,7 +8,11 @@ from pydantic import BaseModel, Field, ValidationError
 
 from backend.models import AgentDecision, CommerceState, ProposedAction
 from backend.openai_client import get_openai_client
-from backend.tools.quantity_extractor import extract_order_quantity, has_order_intent
+from backend.tools.quantity_extractor import (
+    extract_explicit_order_quantity,
+    extract_order_quantity,
+    has_order_intent,
+)
 from backend.tools.sku_resolver import get_sku_by_id, resolve_sku_from_text
 
 
@@ -362,7 +366,8 @@ def _build_actions(
         return actions
 
     if extracted.intent == "order":
-        quantity = extracted.quantity or extract_order_quantity(text)
+        explicit_quantity = extract_explicit_order_quantity(text)
+        quantity = explicit_quantity or extracted.quantity or extract_order_quantity(text)
         if sku_id and quantity:
             sku = get_sku_by_id(sku_id, state.skus)
             if sku and quantity > sku.stock:
