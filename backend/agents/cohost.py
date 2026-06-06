@@ -106,7 +106,10 @@ def analyze_host_transcript(state: CommerceState, text: str) -> tuple[List[Agent
                 sku_id=explicit_resolution.sku_id,
                 source_text=text,
                 confidence=explicit_resolution.confidence,
-                reason="The host transcript explicitly mentioned a seeded SKU.",
+                reason=(
+                    "Fallback rule hit: the host mentioned a seeded SKU, so "
+                    "select and pin it for the shared host/viewer room state."
+                ),
                 evidence=explicit_resolution.evidence,
             )
         )
@@ -115,7 +118,10 @@ def analyze_host_transcript(state: CommerceState, text: str) -> tuple[List[Agent
                 agent="cohost",
                 intent="set_active_sku",
                 confidence=explicit_resolution.confidence,
-                reason="Resolved host product mention against the seeded catalogue.",
+                reason=(
+                    "Resolved host product mention against the seeded catalogue "
+                    "and proposed it as the pinned room SKU."
+                ),
                 evidence=explicit_resolution.evidence,
             )
         )

@@ -6,6 +6,7 @@ import {
   type BackendReport,
   type BackendWorkflowResponse,
   approvePendingAction,
+  approvePendingActionWithEdit,
   backendBaseUrl,
   cents,
   generateReport,
@@ -41,6 +42,7 @@ export default function HostPage() {
     "working",
   );
   const [error, setError] = useState<string | null>(null);
+  const [draftReplies, setDraftReplies] = useState<Record<string, string>>({});
 
   const activeSku = useMemo(
     () => findSku(state, state?.active_sku_id ?? null),
@@ -239,6 +241,27 @@ export default function HostPage() {
                       <p className="mt-1 text-xs text-slate-500">
                         {item.action.source_text}
                       </p>
+                      {item.action.type === "suggest_reply" ? (
+                        <div className="mt-3">
+                          <label
+                            className="text-xs font-semibold uppercase tracking-wide text-amber-800"
+                            htmlFor={`draft-${item.id}`}
+                          >
+                            Reply draft
+                          </label>
+                          <textarea
+                            className="mt-2 min-h-24 w-full resize-y rounded-md border border-amber-200 bg-white p-3 text-sm leading-6 text-slate-800 outline-none transition focus:border-teal-500"
+                            id={`draft-${item.id}`}
+                            onChange={(event) =>
+                              setDraftReplies((current) => ({
+                                ...current,
+                                [item.id]: event.target.value,
+                              }))
+                            }
+                            value={draftReplies[item.id] ?? item.action.reply_text ?? ""}
+                          />
+                        </div>
+                      ) : null}
                       <div className="mt-3 flex flex-wrap gap-2">
                         <button
                           className="min-h-9 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white"
@@ -247,8 +270,26 @@ export default function HostPage() {
                           }
                           type="button"
                         >
-                          Approve
+                          {item.action.type === "suggest_reply"
+                            ? "Accept draft"
+                            : "Approve"}
                         </button>
+                        {item.action.type === "suggest_reply" ? (
+                          <button
+                            className="min-h-9 rounded-md border border-teal-200 bg-white px-3 text-sm font-semibold text-teal-800"
+                            onClick={() =>
+                              runWorkflow(() =>
+                                approvePendingActionWithEdit(
+                                  item.id,
+                                  draftReplies[item.id] ?? item.action.reply_text ?? "",
+                                ),
+                              )
+                            }
+                            type="button"
+                          >
+                            Send edited
+                          </button>
+                        ) : null}
                         <button
                           className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700"
                           onClick={() =>
@@ -271,7 +312,7 @@ export default function HostPage() {
         </div>
 
         <div className="grid gap-4">
-          <Panel title="Product Shelf" eyebrow="Backend source of truth">
+          <Panel title="Product Shelf" eyebrow="Pinned shared SKU">
             {activeSku ? (
               <div className="rounded-md border border-teal-200 bg-teal-50 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -284,7 +325,7 @@ export default function HostPage() {
                       stock
                     </p>
                   </div>
-                  <StatusPill tone="good">Active</StatusPill>
+                  <StatusPill tone="good">Pinned</StatusPill>
                 </div>
                 <ul className="mt-4 space-y-2 text-sm leading-6 text-slate-700">
                   {activeSku.facts.map((fact) => (
@@ -294,7 +335,7 @@ export default function HostPage() {
               </div>
             ) : (
               <p className="text-sm leading-6 text-slate-600">
-                No active SKU yet. Submit a transcript that mentions a seeded SKU.
+                No pinned SKU yet. Submit a transcript that mentions a seeded SKU.
               </p>
             )}
             <div className="mt-3 grid gap-2 sm:grid-cols-2">

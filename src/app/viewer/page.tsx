@@ -3,6 +3,7 @@
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
 import {
   type BackendCommerceState,
+  type BackendLedgerEntry,
   backendBaseUrl,
   cents,
   getBackendState,
@@ -17,8 +18,23 @@ type RoomReply = {
   tone: "viewer" | "agent" | "system";
 };
 
+type BackendStreamPayload = {
+  state: BackendCommerceState;
+  ledger_entries?: BackendLedgerEntry[];
+};
+
 function findSku(state: BackendCommerceState | null, skuId: string | null) {
   return state?.skus.find((sku) => sku.id === skuId) ?? null;
+}
+
+function hostApprovedReply(entry: BackendLedgerEntry) {
+  if (entry.type !== "answer_suggested" || entry.actor !== "host") {
+    return null;
+  }
+  const replyText = entry.payload.reply_text;
+  return typeof replyText === "string" && replyText.trim()
+    ? replyText
+    : entry.message;
 }
 
 export default function ViewerPage() {
@@ -47,8 +63,29 @@ export default function ViewerPage() {
       });
     const events = new EventSource(`${backendBaseUrl}/events/stream`);
     events.onmessage = (event) => {
-      const payload = JSON.parse(event.data) as { state: BackendCommerceState };
+      const payload = JSON.parse(event.data) as BackendStreamPayload;
       setState(payload.state);
+      const approvedReplies: RoomReply[] = [];
+      for (const entry of payload.ledger_entries ?? []) {
+        const message = hostApprovedReply(entry);
+        if (message) {
+          approvedReplies.push({
+            id: entry.id,
+            sender: "LiveCrew Agent" as const,
+            message,
+            tone: "agent" as const,
+          });
+        }
+      }
+      if (approvedReplies.length) {
+        setReplies((current) => {
+          const existingIds = new Set(current.map((reply) => reply.id));
+          const newReplies = approvedReplies.filter(
+            (reply) => !existingIds.has(reply.id),
+          );
+          return [...newReplies, ...current].slice(0, 30);
+        });
+      }
       setStatus("connected");
     };
     events.onerror = () => {
@@ -144,7 +181,7 @@ export default function ViewerPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
-        <Panel title="Active Product" eyebrow="Now featured">
+        <Panel title="Active Product" eyebrow="Pinned by host">
           {activeSku ? (
             <div className="rounded-md border border-slate-200 bg-slate-50 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -166,7 +203,7 @@ export default function ViewerPage() {
             </div>
           ) : (
             <p className="text-sm leading-6 text-slate-600">
-              The host has not listed a product yet.
+              The host has not pinned a product yet.
             </p>
           )}
 

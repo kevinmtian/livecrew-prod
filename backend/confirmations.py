@@ -61,6 +61,34 @@ def reject_pending_action(state: CommerceState, pending_action_id: str) -> Pendi
     return pending
 
 
+def edit_pending_reply_action(
+    state: CommerceState,
+    pending_action_id: str,
+    reply_text: str,
+) -> PendingAction:
+    pending = find_pending_action(state, pending_action_id)
+    if not pending:
+        raise ValueError("Pending action not found")
+    if pending.action.type != "suggest_reply":
+        raise ValueError("Only pending reply suggestions can be edited")
+
+    old_reply = pending.action.reply_text
+    pending.action.reply_text = reply_text
+    append_ledger(
+        state,
+        "pending_reply_edited",
+        "host",
+        "Host edited a pending Concierge reply draft.",
+        pending.action.sku_id,
+        {
+            "pending_action_id": pending.id,
+            "old_reply_text": old_reply,
+            "new_reply_text": reply_text,
+        },
+    )
+    return pending
+
+
 def approve_pending_action(state: CommerceState, pending_action_id: str) -> PendingAction:
     pending = find_pending_action(state, pending_action_id)
     if not pending:

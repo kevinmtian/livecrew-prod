@@ -10,6 +10,7 @@ from backend.models import (
     FlashSaleRequest,
     HostOverrideRequest,
     HostTranscriptRequest,
+    PendingActionEditRequest,
     ProposedAction,
     ViewerMessageRequest,
 )
@@ -105,6 +106,19 @@ async def create_announcement(request: AnnouncementRequest):
 async def approve(pending_action_id: str):
     try:
         response = approve_action(pending_action_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    await broadcast("host_confirmation_resolved", response)
+    return response
+
+
+@app.post("/actions/{pending_action_id}/approve-edited")
+async def approve_edited(pending_action_id: str, request: PendingActionEditRequest):
+    reply_text = request.reply_text.strip()
+    if not reply_text:
+        raise HTTPException(status_code=400, detail="Edited reply cannot be empty")
+    try:
+        response = approve_action(pending_action_id, reply_text=reply_text)
     except ValueError as error:
         raise HTTPException(status_code=404, detail=str(error))
     await broadcast("host_confirmation_resolved", response)

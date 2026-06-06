@@ -4,7 +4,12 @@ from backend.agents.cohost import analyze_host_transcript
 from backend.agents.concierge import analyze_viewer_message
 from backend.agents.producer import generate_report
 from backend.commerce import apply_action
-from backend.confirmations import add_pending_action, approve_pending_action, reject_pending_action
+from backend.confirmations import (
+    add_pending_action,
+    approve_pending_action,
+    edit_pending_reply_action,
+    reject_pending_action,
+)
 from backend.ledger import append_ledger
 from backend.models import (
     AgentDecision,
@@ -117,9 +122,11 @@ def handle_direct_action(action: ProposedAction, *, actor: str = "host_ui") -> W
     return mutate_state(run)
 
 
-def approve_action(pending_action_id: str) -> WorkflowResponse:
+def approve_action(pending_action_id: str, reply_text: Optional[str] = None) -> WorkflowResponse:
     def run(state: CommerceState) -> WorkflowResponse:
         before_ledger_count = len(state.ledger)
+        if reply_text is not None:
+            edit_pending_reply_action(state, pending_action_id, reply_text)
         pending = approve_pending_action(state, pending_action_id)
         response = _process_actions(
             state,

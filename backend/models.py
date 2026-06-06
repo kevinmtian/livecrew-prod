@@ -184,3 +184,7 @@ class FlashSaleRequest(BaseModel):
 class HostOverrideRequest(BaseModel):
     pending_action_id: Optional[str] = None
     action: ProposedAction
+
+
+class PendingActionEditRequest(BaseModel):
+    reply_text: str

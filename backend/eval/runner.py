@@ -1,3 +1,4 @@
+import os
 from typing import Dict, List
 
 from backend.state import get_state, replace_state
@@ -6,9 +7,15 @@ from backend.workflow import handle_host_transcript, handle_viewer_message, rese
 
 def run_agent_suite() -> Dict:
     original_state = get_state()
+    original_openai_disabled = os.getenv("LIVECREW_DISABLE_OPENAI_CONCIERGE")
+    os.environ["LIVECREW_DISABLE_OPENAI_CONCIERGE"] = "1"
     try:
         return _run_agent_suite()
     finally:
+        if original_openai_disabled is None:
+            os.environ.pop("LIVECREW_DISABLE_OPENAI_CONCIERGE", None)
+        else:
+            os.environ["LIVECREW_DISABLE_OPENAI_CONCIERGE"] = original_openai_disabled
         replace_state(original_state)
 
 
@@ -50,13 +57,13 @@ def _run_agent_suite() -> Dict:
             "viewer",
             [
                 ("Can I get two?", "pending:request_host_confirmation"),
-                ("What is the price?", "pending:request_host_confirmation"),
-                ("Is this good?", "pending:request_host_confirmation"),
+                ("What is the price?", "suggest_reply:None"),
+                ("Is this good?", "suggest_reply:None"),
                 ("I want two.", "pending:request_host_confirmation"),
                 ("Can I order 3?", "pending:request_host_confirmation"),
-                ("Can you answer this?", "pending:request_host_confirmation"),
-                ("How big is this?", "pending:request_host_confirmation"),
-                ("Is it still available?", "pending:request_host_confirmation"),
+                ("Can you answer this?", "suggest_reply:None"),
+                ("How big is this?", "suggest_reply:None"),
+                ("Is it still available?", "suggest_reply:None"),
                 ("I want one.", "pending:request_host_confirmation"),
                 ("Can I buy?", "pending:request_host_confirmation"),
             ],
@@ -75,6 +82,10 @@ def _run_agent_suite() -> Dict:
                 ("How much is this one?", "suggest_reply:bamboo-thermal-tumbler", "Let's show the tumbler now."),
                 ("What is the tumbler made for?", "suggest_reply:bamboo-thermal-tumbler", "Let's show the serum now."),
                 ("Is the eye mask adjustable?", "suggest_reply:satin-cloud-sleep-mask", "Let's show the serum now."),
+                ("What is the price?", "suggest_reply:bamboo-thermal-tumbler", "Let's show the tumbler now."),
+                ("How many in stock?", "suggest_reply:glowfix-vitamin-c-serum", "Let's show the serum now."),
+                ("How much is the sleep mask?", "suggest_reply:satin-cloud-sleep-mask", "Let's show the serum now."),
+                ("How much is the lipstick?", "no_such_product", "Let's show the serum now."),
             ],
         ),
         *category_cases(
@@ -99,14 +110,21 @@ def _run_agent_suite() -> Dict:
             [
                 ("Can I get 50% off?", "pending:suggest_reply", "Let's show the serum now."),
                 ("Any half off for this?", "pending:suggest_reply", "Let's show the serum now."),
-                ("Will this cure acne?", "pending:request_host_confirmation", "Let's show the serum now."),
-                ("Is this guaranteed?", "pending:request_host_confirmation", "Let's show the serum now."),
-                ("Can I get free shipping?", "pending:request_host_confirmation", "Let's show the serum now."),
-                ("Do you promise same day delivery?", "pending:request_host_confirmation", "Let's show the serum now."),
-                ("Is this authentic?", "pending:request_host_confirmation", "Let's show the serum now."),
-                ("Any medical guarantee?", "pending:request_host_confirmation", "Let's show the serum now."),
-                ("Can you say this is guaranteed to work?", "pending:request_host_confirmation", "Let's show the serum now."),
+                ("Will this cure acne?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Is this guaranteed?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Can I get free shipping?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Do you promise same day delivery?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Is this authentic?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Any medical guarantee?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Can you say this is guaranteed to work?", "pending:suggest_reply", "Let's show the serum now."),
                 ("Give me an unverified discount.", "pending:suggest_reply", "Let's show the serum now."),
+                ("Is it good for my heart problem?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Is it good for my headache problem?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Is it good for my headache?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Is this safe if I am pregnant?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Will this help my allergy?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Can I use this with blood pressure medication?", "pending:suggest_reply", "Let's show the serum now."),
+                ("Will this help with fever?", "pending:suggest_reply", "Let's show the serum now."),
             ],
         ),
         *category_cases(
@@ -147,14 +165,16 @@ def _run_agent_suite() -> Dict:
             [
                 ("I would like to purchase two please.", "create_order:satin-cloud-sleep-mask:2", "Let's show the sleep mask now."),
                 ("ok lah get me 3 of this", "create_order:bamboo-thermal-tumbler:3", "Let's show the tumbler now."),
-                ("Can the serum cure spots and can I buy two?", "pending:request_host_confirmation", "Let's show the serum now."),
+                ("Can the serum cure spots and can I buy two?", "pending:suggest_reply", "Let's show the serum now."),
                 ("get x2", "create_order:hydramist-cushion-spf:2", "Let's show the cushion SPF now."),
                 ("Any half off for this?", "pending:suggest_reply", "Let's show the serum now."),
                 ("What can you say about this one?", "suggest_reply:bamboo-thermal-tumbler", "Let's show the tumbler now."),
                 ("Can I buy the eye mask?", "create_order:satin-cloud-sleep-mask:1"),
+                ("Do you sell air fryer?", "no_such_product", "Let's show the tumbler now."),
                 ("Host says show the reusable cup.", "set_active_sku:bamboo-thermal-tumbler", None, "host"),
                 ("First ten buyers get it at 15 for five minutes.", "create_flash_sale:bamboo-thermal-tumbler:1500", "Let's show the tumbler now.", "host"),
                 ("Make this one 11 dollars.", "update_price:satin-cloud-sleep-mask:1100", "Let's show the sleep mask now.", "host"),
+                ("how's the weather", "noop:None", "Let's show the tumbler now."),
             ],
         ),
     ]
@@ -206,6 +226,9 @@ def _run_agent_suite() -> Dict:
 def _summarize_response(response) -> str:
     parts = []
     for action in response.proposed_actions:
+        if action.type == "suggest_reply" and action.reply_text:
+            if "cannot find" in action.reply_text.lower():
+                parts.append("no_such_product")
         if action.type == "create_order":
             parts.append(f"{action.type}:{action.sku_id}:{action.quantity}")
         elif action.type in ["update_price"]:

@@ -186,6 +186,13 @@ export function approvePendingAction(id: string) {
   });
 }
 
+export function approvePendingActionWithEdit(id: string, replyText: string) {
+  return requestBackend<BackendWorkflowResponse>(`/actions/${id}/approve-edited`, {
+    method: "POST",
+    body: JSON.stringify({ reply_text: replyText }),
+  });
+}
+
 export function rejectPendingAction(id: string) {
   return requestBackend<BackendWorkflowResponse>(`/actions/${id}/reject`, {
     method: "POST",

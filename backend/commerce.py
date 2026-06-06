@@ -58,17 +58,27 @@ def apply_action(
             state,
             "list_product",
             actor,
-            f"Listed {sku.name} as the active SKU.",
+            f"Selected and pinned {sku.name} as the shared room SKU.",
             sku.id,
-            {"source_text": action.source_text, "evidence": action.evidence},
+            {
+                "source_text": action.source_text,
+                "evidence": action.evidence,
+                "active_sku_id": sku.id,
+                "pinned_sku_id": sku.id,
+                "pinned": True,
+            },
         )
         ledgers.append(entry)
         return (
             AppliedAction(
                 type=action.type,
                 sku_id=sku.id,
-                message=f"{sku.name} is now active.",
-                payload={"active_sku_id": sku.id},
+                message=f"{sku.name} is selected and pinned.",
+                payload={
+                    "active_sku_id": sku.id,
+                    "pinned_sku_id": sku.id,
+                    "pinned": True,
+                },
             ),
             ledgers,
         )
