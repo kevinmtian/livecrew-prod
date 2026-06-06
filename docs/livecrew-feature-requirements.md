@@ -215,6 +215,10 @@ Examples:
 Host speaks: "Let's show the tumbler now."
 -> OpenAI realtime transcription emits: "Let's show the tumbler now."
 -> CoHostAgent receives the transcript event.
+
+Host speaks: "Set stock to 100."
+-> OpenAI realtime transcription may emit: "Set talk to 100."
+-> CoHostAgent infers the likely stock-update intent when the active SKU is known.
 ```
 
 Expected behavior:
@@ -228,6 +232,8 @@ Expected behavior:
 - Each finalized transcript segment should become a normalized `host_transcript` event.
 - Finalized host transcript segments should be appended to a backend-managed CoHost conversation context before action extraction, so multi-sentence host intents can be understood without relying on a fixed transcript window.
 - The CoHost conversation context should preserve ordered system, host user, and assistant action-trace messages. The system prompt should inject the seeded SKU catalogue, current commerce state, and supported action list on each model call.
+- CoHostAgent should tolerate minor transcription errors in commerce keywords when the corrected interpretation is strongly supported by the supported action list, current active SKU, numeric fields, and recent context; for example, "Set talk to 100" may be interpreted as "Set stock to 100" for the active SKU.
+- CoHostAgent should preserve the raw transcript as evidence when it makes a transcription-noise inference, and should return `noop` or require host confirmation when the correction is uncertain.
 - If CoHostAgent returns only `noop`, the next host transcript segment should be merged into the previous host user message and the merged message should be re-analyzed. Effective actions should close the current host user message and be recorded as an assistant action trace.
 - The context should keep at most 50 user-role messages before summarizing the earliest 25 user-role messages into a replacement user-role summary inserted at the beginning of the chronological message history after the system prompt.
 - Transcript events should include timestamp, source, text, and processing status.
@@ -241,6 +247,7 @@ Acceptance criteria:
 - With `OPENAI_API_KEY` configured, host speech can produce finalized transcript events for CoHostAgent processing.
 - The host cockpit can receive OpenAI Realtime transcription delta events for preview and completed transcription events for backend processing.
 - A finalized transcript segment can trigger CoHostAgent intent recognition using the current CoHost conversation context.
+- A finalized transcript segment with a minor commerce-keyword transcription error can still trigger the intended action when the action fields are complete and grounded.
 - Consecutive transcript fragments that individually produce `noop` can later produce one valid action after they are merged into the same host user message.
 - If transcription fails, no commerce state is mutated.
 - The host can still use the typed CoHost debug input as a fallback for hackathon reliability.
@@ -308,10 +315,11 @@ Expected behavior:
 - `/viewer` should render as a phone-sized customer room, centered on desktop and filling the available viewport on mobile.
 - The upper two-thirds of the phone room should be the livestream area.
 - The lower one-third of the phone room should be the chat area.
-- The livestream area should show host video when available, and a clear offline or connecting state when unavailable.
+- The livestream area should show host video when available. When the host is not live, the viewer room should show only a simple English "Not live" state without extra instructions, buttons, or raw backend error text.
+- On startup and reset, no product should be mounted by default; the viewer room should not render a product overlay until the host or CoHostAgent sets an active SKU.
 - When CoHostAgent or host actions set the active SKU, the livestream area should show the active product details.
 - Active product details should include product name, price, stock, and a short grounded description from SKU facts.
-- Product information should come from backend active SKU state, with local demo state only as a fallback.
+- Product information should come from backend active SKU state, with local demo state only as a fallback when the backend is unavailable; a backend `null` active SKU must not be replaced by a default product.
 - The product overlay must not hide the chat input or make the video controls unusable.
 - Viewer chat should stay readable and scrollable within the lower third of the phone layout.
 
@@ -600,6 +608,7 @@ Viewers should be able to buy the currently displayed product from the mobile li
 Expected behavior:
 
 - The viewer room should show a purchase control for the currently active SKU.
+- If no active SKU is mounted, purchase controls should be hidden or disabled and no default product should be orderable.
 - Clicking purchase should open a confirmation modal instead of immediately creating an order.
 - The modal should show product name, current backend price, selected quantity, total price, and current available quantity.
 - Quantity must be a positive integer and must not exceed the currently available purchasable quantity.
@@ -614,6 +623,7 @@ Expected behavior:
 Acceptance criteria:
 
 - A viewer can start checkout for the active product and sees a confirmation modal.
+- With no active SKU, the viewer cannot start checkout from a default or fallback product.
 - The modal prevents selecting a quantity greater than the currently available quantity.
 - Confirming checkout creates an order using the backend current price and updates backend stock.
 - Flash-sale purchases use sale price only while sale stock is available.
