@@ -133,6 +133,13 @@ export type MediaSession = {
   viewer_candidates: RTCIceCandidateInit[];
 };
 
+export type RealtimeTranscriptionToken = {
+  value: string;
+  expires_at: number | null;
+  session_id: string | null;
+  model: string;
+};
+
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 export function getBackendUrl() {
@@ -189,6 +196,12 @@ export function sendEditedPendingReply(pendingActionId: string, replyText: strin
   return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reply`, {
     method: "POST",
     body: JSON.stringify({ reply_text: replyText }),
+  });
+}
+
+export function createRealtimeTranscriptionToken() {
+  return requestJson<RealtimeTranscriptionToken>("/events/realtime-transcription-token", {
+    method: "POST",
   });
 }
 

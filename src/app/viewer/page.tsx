@@ -1,6 +1,6 @@
 "use client";
 
-import { AppShell, StatusPill } from "@/components/dashboard";
+import { StatusPill } from "@/components/dashboard";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
   appendAgentReply,
@@ -15,7 +15,6 @@ import {
   fetchBackendState,
   fetchLatestMediaSession,
   fetchMediaSession,
-  getBackendUrl,
   postIceCandidate,
   postMediaAnswer,
   sendViewerMessage,
@@ -291,12 +290,8 @@ export default function ViewerPage() {
   }
 
   return (
-    <AppShell
-      eyebrow="Viewer"
-      title="Customer livestream room"
-      description={`Python backend: ${getBackendUrl()}`}
-    >
-      <div className="mx-auto flex h-[calc(100dvh-11rem)] max-h-[860px] w-full max-w-[430px] flex-col overflow-hidden rounded-lg border border-slate-300 bg-slate-950 shadow-sm">
+    <main className="flex min-h-dvh bg-[#f7f8fa] p-3 sm:items-center sm:justify-center">
+      <div className="mx-auto flex h-[calc(100dvh-1.5rem)] max-h-[860px] w-full max-w-[430px] flex-col overflow-hidden rounded-lg border border-slate-300 bg-slate-950 shadow-sm sm:rounded-[2rem]">
         <section className="relative flex-[2] overflow-hidden bg-slate-950">
           <video
             autoPlay
@@ -506,6 +501,6 @@ export default function ViewerPage() {
           ) : null}
         </section>
       </div>
-    </AppShell>
+    </main>
   );
 }

@@ -15,7 +15,7 @@ The frontend is a Next.js app. The backend is a Python FastAPI service with a La
   - Runs transcript text through the same CoHostAgent path.
   - Starts local camera and microphone capture.
   - Creates a WebRTC media session for the viewer page.
-  - Records a 4-second audio clip and sends it to the backend OpenAI transcription endpoint.
+  - Uses an OpenAI Realtime transcription session for live host microphone captions.
 - `/viewer` livestream room
   - Connects to the latest host WebRTC media session.
   - Shows host audio/video when the host stream is live.
@@ -46,6 +46,9 @@ Create `.env` in the repo root when using OpenAI transcription:
 
 ```bash
 OPENAI_API_KEY=your_api_key_here
+# Optional:
+OPENAI_REALTIME_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+OPENAI_REALTIME_TRANSCRIPTION_LANGUAGE=en
 ```
 
 The `.env` file is git-ignored.
@@ -100,9 +103,10 @@ curl -X POST http://localhost:8000/events/host-command \
 1. Start the Python backend with `OPENAI_API_KEY` in `.env`.
 2. Open `/host`.
 3. Click `Start stream` and allow camera/microphone permissions.
-4. Click `Record 4s`.
-5. The frontend uploads the audio clip to `POST /events/transcribe-audio`.
-6. The backend transcribes the audio with OpenAI, then sends the transcript through `POST /events/host-transcript`.
+4. The host page requests a short-lived Realtime transcription token from `POST /events/realtime-transcription-token`.
+5. The browser sends microphone audio to OpenAI Realtime over WebRTC.
+6. Interim transcript deltas appear in the live transcript panel.
+7. Completed transcript turns are sent through `POST /events/host-transcript`.
 
 If `OPENAI_API_KEY` is missing, transcription returns a clear backend error and the rest of the demo still works.
 
@@ -125,6 +129,7 @@ GET    /state
 POST   /reset
 POST   /events/host-command
 POST   /events/host-transcript
+POST   /events/realtime-transcription-token
 POST   /events/transcribe-audio
 GET    /events/stream
 POST   /media/session
