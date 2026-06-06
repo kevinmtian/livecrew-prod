@@ -1,34 +1,3 @@
-export const mockProducts = [
-  {
-    id: "glowfix-serum",
-    name: "GlowFix Vitamin C Serum",
-    price: "$24.00",
-    stock: 42,
-    facts: ["Brightening serum", "30 ml bottle", "Use in the morning"],
-  },
-  {
-    id: "hydramist-cushion",
-    name: "HydraMist Cushion SPF",
-    price: "$31.00",
-    stock: 28,
-    facts: ["SPF cushion compact", "Dewy finish", "Refillable case"],
-  },
-  {
-    id: "bamboo-tumbler",
-    name: "Bamboo Thermal Tumbler",
-    price: "$18.00",
-    stock: 55,
-    facts: ["500 ml capacity", "Thermal insulation", "Bamboo exterior"],
-  },
-  {
-    id: "satin-mask",
-    name: "Satin Cloud Sleep Mask",
-    price: "$12.00",
-    stock: 64,
-    facts: ["Soft satin feel", "Adjustable strap", "Blocks ambient light"],
-  },
-];
-
 export const mockChat = [
   {
     viewer: "Maya",

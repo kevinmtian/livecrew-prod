@@ -1,8 +1,16 @@
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
-import { mockChat, mockLedgerEvents, mockProducts } from "@/lib/mock-data";
+import {
+  defaultActiveSkuId,
+  getActiveSkuDisplay,
+  resolveSkuFromText,
+} from "@/lib/catalogue";
+import { mockChat, mockLedgerEvents } from "@/lib/mock-data";
 
 export default function HostPage() {
-  const activeProduct = mockProducts[0];
+  const activeProduct = getActiveSkuDisplay(defaultActiveSkuId);
+  const transcriptMention = resolveSkuFromText(
+    "Today we are starting with GlowFix Vitamin C Serum.",
+  );
 
   return (
     <AppShell
@@ -47,7 +55,7 @@ export default function HostPage() {
                     {activeProduct.name}
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
-                    {activeProduct.price} · {activeProduct.stock} in stock
+                    {activeProduct.price} · {activeProduct.stockLabel}
                   </p>
                 </div>
                 <StatusPill tone="good">Highlighted</StatusPill>
@@ -57,6 +65,9 @@ export default function HostPage() {
                   <li key={fact}>- {fact}</li>
                 ))}
               </ul>
+              <p className="mt-4 text-xs text-teal-800">
+                Resolved from transcript: {transcriptMention?.name ?? "No SKU"}
+              </p>
             </div>
           </Panel>
           <Panel title="AI Suggested Replies" eyebrow="Agent queue">
