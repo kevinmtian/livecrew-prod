@@ -7,6 +7,7 @@ import {
   defaultActiveSkuId,
   getActiveSkuDisplay,
   resolveSkuById,
+  resolveSkuFromText,
 } from "@/lib/catalogue";
 import {
   appendAgentReply,
@@ -28,6 +29,7 @@ import {
   type ViewerInsightSnapshot,
   type WorkflowResponse,
   approvePendingAction,
+  assessViewerQuestionAnswered,
   createMediaSession,
   exchangeRealtimeTranscriptionOffer,
   fetchBackendState,
@@ -86,8 +88,6 @@ type RealtimeTranscriptionEvent = {
   };
 };
 
-const MAX_VIEWER_MONITOR_QUEUE_ITEMS = 3;
-
 type AgentRole =
   | "Input"
   | "Co-Host"
@@ -126,15 +126,10 @@ type AgentFlowModel = {
 
 type AgentFlowNodeDraft = Omit<AgentFlowNode, "state">;
 
-type PrioritizedViewerChat = {
-  id: string;
-  viewer: string;
-  text: string;
-  isLive: boolean;
-  handledByAgent: boolean;
-  isProductRelated: boolean;
+type QueuedViewerComment = ViewerComment & {
   frequency: number;
-  createdAt: number;
+  groupedCommentIds: string[];
+  isProductRelated: boolean;
 };
 
 const initialLedger: LedgerEvent[] = [
@@ -264,60 +259,73 @@ function normalizeChatText(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function prioritizeViewerChats(
-  state: LocalRoomState,
+function getCommentCreatedAt(comment: ViewerComment) {
+  const createdAt = new Date(comment.created_at).getTime();
+  return Number.isNaN(createdAt) ? 0 : createdAt;
+}
+
+function dedupeViewerComments(
+  comments: ViewerComment[],
+  activeSkuId: string | null | undefined,
   activeSkuName: string,
   activeSkuAliases: string[],
-  escalatedSourceTexts: string[],
 ) {
   const productTerms = [activeSkuName, ...activeSkuAliases]
     .map(normalizeChatText)
     .filter((term) => term.length >= 3);
-  const escalatedTextSet = new Set(escalatedSourceTexts.map(normalizeChatText));
-  const chats: PrioritizedViewerChat[] = state.viewerMessages.map((chat) => ({
-      id: chat.id,
-      viewer: chat.name,
-      text: chat.text,
-      isLive: true,
-      createdAt: chat.createdAt,
-      handledByAgent: chat.handledByAgent ?? false,
-      isProductRelated: false,
-      frequency: 1,
-    }));
-  const frequencyByText = chats.reduce<Record<string, number>>((counts, chat) => {
-    const key = normalizeChatText(chat.text);
-    counts[key] = (counts[key] ?? 0) + 1;
-    return counts;
-  }, {});
+  const normalizedActiveSkuId = activeSkuId ?? null;
+  const groupedComments = comments.reduce<Record<string, QueuedViewerComment>>(
+    (groups, comment) => {
+      const key = normalizeChatText(comment.text);
+      const existingComment = groups[key];
+      const matchedSku = resolveSkuFromText(comment.text);
+      const isProductRelated =
+        (normalizedActiveSkuId !== null && comment.sku_id === normalizedActiveSkuId) ||
+        (normalizedActiveSkuId !== null && matchedSku?.id === normalizedActiveSkuId) ||
+        productTerms.some((term) => key.includes(term));
 
-  return chats
-    .filter((chat) => {
-      if (!chat.isLive) {
-        return true;
+      if (!existingComment) {
+        groups[key] = {
+          ...comment,
+          frequency: 1,
+          groupedCommentIds: [comment.id],
+          isProductRelated,
+        };
+        return groups;
       }
-      const normalizedText = normalizeChatText(chat.text);
-      if (escalatedTextSet.has(normalizedText)) {
-        return true;
-      }
-      return !chat.handledByAgent;
-    })
-    .map((chat) => {
-      const normalizedText = normalizeChatText(chat.text);
-      return {
-        ...chat,
-        isProductRelated: productTerms.some((term) => normalizedText.includes(term)),
-        frequency: frequencyByText[normalizedText] ?? 1,
+
+      const commentIsNewer =
+        getCommentCreatedAt(comment) > getCommentCreatedAt(existingComment);
+      groups[key] = {
+        ...(commentIsNewer ? comment : existingComment),
+        frequency: existingComment.frequency + 1,
+        groupedCommentIds: [...existingComment.groupedCommentIds, comment.id],
+        isProductRelated: existingComment.isProductRelated || isProductRelated,
       };
-    })
-    .sort((first, second) => {
-      if (first.isProductRelated !== second.isProductRelated) {
-        return first.isProductRelated ? -1 : 1;
-      }
-      if (first.frequency !== second.frequency) {
-        return second.frequency - first.frequency;
-      }
-      return second.createdAt - first.createdAt;
-    });
+      return groups;
+    },
+    {},
+  );
+
+  return Object.values(groupedComments).sort((first, second) => {
+    if (first.isProductRelated !== second.isProductRelated) {
+      return first.isProductRelated ? -1 : 1;
+    }
+    if (first.frequency !== second.frequency) {
+      return second.frequency - first.frequency;
+    }
+    return getCommentCreatedAt(second) - getCommentCreatedAt(first);
+  });
+}
+
+function fallbackHostCueForQuestion(comment: QueuedViewerComment) {
+  if (comment.intent === "create_order") {
+    return "Host cue: this looks like an order request. Confirm the SKU, quantity, and checkout path before treating it as handled.";
+  }
+  if (comment.intent === "suggest_reply" || comment.intent === "product_facts") {
+    return "Suggested line: Let me answer that from what we have confirmed today, then I will point you to the product card if it is available.";
+  }
+  return "Suggested line: I see this question. Let me answer it live based on confirmed product information; if we do not have it today, I will suggest the closest available option or ask viewers to follow for restock updates.";
 }
 
 function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
@@ -358,79 +366,6 @@ function describePendingAction(pending: PendingAction, state: BackendState | nul
   ].filter(Boolean);
 
   return details.join(" · ");
-}
-
-function formatCommentTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function ViewerCommentCard({
-  comment,
-  ignored,
-  onIgnore,
-  onUseReply,
-}: {
-  comment: ViewerComment;
-  ignored: boolean;
-  onIgnore: () => void;
-  onUseReply: (reply: string) => void;
-}) {
-  const statusTone =
-    comment.reply_status === "blocked" || comment.reply_status === "needs_host"
-      ? "warning"
-      : comment.reply_status === "suggested"
-        ? "good"
-        : "neutral";
-
-  return (
-    <div className="rounded-md border border-slate-200 bg-white p-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <p className="text-xs font-semibold text-slate-500">
-            {comment.viewer} {formatCommentTime(comment.created_at)}
-          </p>
-          {comment.intent ? (
-            <p className="mt-0.5 text-xs text-slate-400">
-              {comment.intent.replaceAll("_", " ")}
-            </p>
-          ) : null}
-        </div>
-        <StatusPill tone={statusTone}>
-          {ignored ? "ignored" : comment.reply_status.replaceAll("_", " ")}
-        </StatusPill>
-      </div>
-      <p className="mt-2 text-sm leading-6 text-slate-800">{comment.text}</p>
-      {comment.suggested_reply ? (
-        <div className="mt-3 rounded-md border border-teal-200 bg-teal-50 p-3">
-          <p className="text-sm leading-6 text-slate-700">
-            {comment.suggested_reply}
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <button
-              className="min-h-9 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
-              disabled={ignored}
-              onClick={() => onUseReply(comment.suggested_reply ?? "")}
-              type="button"
-            >
-              Use
-            </button>
-            <button
-              className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 disabled:text-slate-400"
-              disabled={ignored}
-              onClick={onIgnore}
-              type="button"
-            >
-              Ignore
-            </button>
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 function clampText(value: string | null | undefined, fallback = "No detail") {
@@ -1070,6 +1005,9 @@ export default function HostPage() {
   const [editedEscalationReplies, setEditedEscalationReplies] = useState<
     Record<string, string>
   >({});
+  const [interactionDraftReplies, setInteractionDraftReplies] = useState<
+    Record<string, string>
+  >({});
   const [liveTranscriptError, setLiveTranscriptError] = useState("");
   const [debugMessagesVisible, setDebugMessagesVisible] = useState(false);
   const [debugMessagesLoading, setDebugMessagesLoading] = useState(false);
@@ -1081,7 +1019,14 @@ export default function HostPage() {
   const [viewerMonitorError, setViewerMonitorError] = useState("");
   const [latestInsight, setLatestInsight] =
     useState<ViewerInsightSnapshot | null>(null);
-  const [ignoredDraftIds, setIgnoredDraftIds] = useState<string[]>([]);
+  const [resolvedDraftIds, setResolvedDraftIds] = useState<string[]>([]);
+  const [resolvingDraftIds, setResolvingDraftIds] = useState<string[]>([]);
+  const [activeInteractionCueIds, setActiveInteractionCueIds] = useState<string[]>(
+    [],
+  );
+  const [deferredInteractionCueIds, setDeferredInteractionCueIds] = useState<
+    string[]
+  >([]);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -1097,9 +1042,6 @@ export default function HostPage() {
   const backendActiveSku = backendState?.skus.find(
     (sku) => sku.id === backendState.active_sku_id,
   );
-  const liveRoomMessages = [...roomState.viewerMessages, ...roomState.replies].sort(
-    (firstMessage, secondMessage) => firstMessage.createdAt - secondMessage.createdAt,
-  );
   const conciergeEscalations =
     backendState?.pending_actions.filter(
       (pending) =>
@@ -1107,12 +1049,6 @@ export default function HostPage() {
         pending.requested_by === "concierge" &&
         pending.action.type === "suggest_reply",
     ) ?? [];
-  const prioritizedViewerChats = prioritizeViewerChats(
-    roomState,
-    backendActiveSku?.name ?? activeProduct.name,
-    backendActiveSku?.aliases ?? activeProduct.aliases,
-    conciergeEscalations.map((pending) => pending.action.source_text),
-  );
   const pendingConfirmations =
     backendState?.pending_actions.filter(
       (pending) =>
@@ -1124,13 +1060,66 @@ export default function HostPage() {
         ),
     ) ??
     [];
-  const viewerCommentCount = backendState?.viewer_comments.length ?? 0;
-  const recentViewerComments =
-    backendState?.viewer_comments.slice(0, MAX_VIEWER_MONITOR_QUEUE_ITEMS) ?? [];
-  const hiddenViewerCommentCount = Math.max(
-    0,
-    viewerCommentCount - recentViewerComments.length,
+  const queuedViewerComments = dedupeViewerComments(
+    backendState?.viewer_comments.filter(
+      (comment) =>
+        comment.reply_status !== "suggested" &&
+        !resolvedDraftIds.includes(comment.id),
+    ) ?? [],
+    backendState?.active_sku_id ?? activeSkuId,
+    backendActiveSku?.name ?? activeProduct.name,
+    backendActiveSku?.aliases ?? activeProduct.aliases,
   );
+  const activeInteractionCue =
+    activeInteractionCueIds.length > 0
+      ? queuedViewerComments.find((comment) =>
+          comment.groupedCommentIds.some((id) =>
+            activeInteractionCueIds.includes(id),
+          ),
+        ) ?? null
+      : [...queuedViewerComments]
+          .filter(
+            (comment) =>
+              !comment.groupedCommentIds.some((id) =>
+                deferredInteractionCueIds.includes(id),
+              ),
+          )
+          .sort(
+            (first, second) =>
+              getCommentCreatedAt(second) - getCommentCreatedAt(first),
+          )[0] ?? null;
+  const activeConciergeEscalation = activeInteractionCue
+    ? conciergeEscalations.find(
+        (pending) =>
+          normalizeChatText(pending.action.source_text) ===
+          normalizeChatText(activeInteractionCue.text),
+      ) ?? null
+    : null;
+  const activeEscalationDraft =
+    activeConciergeEscalation
+      ? editedEscalationReplies[activeConciergeEscalation.id] ??
+        activeConciergeEscalation.action.reply_text ??
+        ""
+      : activeInteractionCue
+        ? interactionDraftReplies[activeInteractionCue.id] ??
+          activeInteractionCue.suggested_reply ??
+          fallbackHostCueForQuestion(activeInteractionCue)
+        : "";
+  const activeEscalationReason =
+    activeConciergeEscalation?.guardrail_result.reason ??
+    (activeInteractionCue
+      ? "Host should answer this viewer question live or adopt the candidate response."
+      : "No active viewer question needs host review.");
+  const activeCueResolving =
+    activeInteractionCue?.groupedCommentIds.some((id) =>
+      resolvingDraftIds.includes(id),
+    ) ?? false;
+  const waitingViewerComments = queuedViewerComments.filter((comment) =>
+    activeInteractionCue
+      ? normalizeChatText(comment.text) !== normalizeChatText(activeInteractionCue.text)
+      : true,
+  );
+  const recentViewerComments = waitingViewerComments;
   const activeInsight = latestInsight ?? backendState?.viewer_insights[0] ?? null;
   const agentFlow = buildAgentFlow({
     backendState,
@@ -1309,6 +1298,24 @@ export default function HostPage() {
       source: "speech_transcript",
       matchedEntity: inferMatchedSkuName(trimmedText, backendState),
     });
+    if (
+      activeInteractionCue
+    ) {
+      void assessViewerQuestionAnswered(activeInteractionCue.text, trimmedText)
+        .then((assessment) => {
+          if (assessment.answered) {
+            handleMarkInteractionAnswered(activeInteractionCue.groupedCommentIds);
+          }
+        })
+        .catch(() => {
+          appendLedger({
+            id: "evt-answer-assessment-error",
+            label: "Answer assessment failed",
+            detail: "OpenAI could not determine whether the host answered the viewer question.",
+            status: "blocked",
+          });
+        });
+    }
     try {
       const response = await sendHostTranscript(trimmedText);
       applyWorkflowResponse(response);
@@ -1502,11 +1509,17 @@ export default function HostPage() {
     });
   }
 
-  async function handleAcceptEscalation(pendingActionId: string) {
+  async function handleAcceptEscalation(
+    pendingActionId: string,
+    commentIds?: string[],
+  ) {
     setResolvingActionId(pendingActionId);
     try {
       const response = await approvePendingAction(pendingActionId);
       applyConciergeResolution(response);
+      if (commentIds?.length) {
+        handleMarkInteractionAnswered(commentIds);
+      }
     } catch (error) {
       appendLedger({
         id: "evt-escalation-accept-error",
@@ -1520,7 +1533,10 @@ export default function HostPage() {
     }
   }
 
-  async function handleSendEditedEscalation(pendingActionId: string) {
+  async function handleSendEditedEscalation(
+    pendingActionId: string,
+    commentIds?: string[],
+  ) {
     const replyText = editedEscalationReplies[pendingActionId]?.trim();
     if (!replyText) {
       return;
@@ -1530,6 +1546,9 @@ export default function HostPage() {
     try {
       const response = await sendEditedPendingReply(pendingActionId, replyText);
       applyConciergeResolution(response);
+      if (commentIds?.length) {
+        handleMarkInteractionAnswered(commentIds);
+      }
     } catch (error) {
       appendLedger({
         id: "evt-escalation-edit-error",
@@ -1647,13 +1666,44 @@ export default function HostPage() {
     }
   }
 
-  function handleUseDraftReply(reply: string) {
+  function handleUseDraftReply(reply: string, commentIds?: string[]) {
     setReplyInput(reply);
+    if (commentIds?.length) {
+      handleMarkInteractionAnswered(commentIds);
+    }
   }
 
-  function handleIgnoreDraft(commentId: string) {
-    setIgnoredDraftIds((currentIds) =>
-      currentIds.includes(commentId) ? currentIds : [...currentIds, commentId],
+  function handleMarkInteractionAnswered(commentIds: string[]) {
+    setResolvingDraftIds((currentIds) =>
+      Array.from(new Set([...currentIds, ...commentIds])),
+    );
+    window.setTimeout(() => {
+      setResolvedDraftIds((currentIds) =>
+        Array.from(new Set([...currentIds, ...commentIds])),
+      );
+      setActiveInteractionCueIds((currentIds) =>
+        currentIds.filter((id) => !commentIds.includes(id)),
+      );
+      setDeferredInteractionCueIds((currentIds) =>
+        currentIds.filter((id) => !commentIds.includes(id)),
+      );
+      setResolvingDraftIds((currentIds) =>
+        currentIds.filter((id) => !commentIds.includes(id)),
+      );
+    }, 900);
+  }
+
+  function handleDeferInteractionCue(commentIds: string[]) {
+    setDeferredInteractionCueIds((currentIds) =>
+      Array.from(new Set([...currentIds, ...commentIds])),
+    );
+    setActiveInteractionCueIds([]);
+  }
+
+  function handleSelectWaitingComment(comment: QueuedViewerComment) {
+    setActiveInteractionCueIds(comment.groupedCommentIds);
+    setDeferredInteractionCueIds((currentIds) =>
+      currentIds.filter((id) => !comment.groupedCommentIds.includes(id)),
     );
   }
 
@@ -1671,10 +1721,13 @@ export default function HostPage() {
     setCommandInput("Switch to the Bamboo Thermal Tumbler.");
     setLiveTranscriptLines([]);
     setInterimTranscript("");
+    setResolvedDraftIds([]);
+    setResolvingDraftIds([]);
+    setActiveInteractionCueIds([]);
+    setDeferredInteractionCueIds([]);
     setLiveTranscriptError("");
     setHostInputTrace(null);
     setLatestInsight(null);
-    setIgnoredDraftIds([]);
     setViewerMonitorError("");
     setLedgerEvents(initialLedger);
     setQueueItems([
@@ -2283,82 +2336,6 @@ export default function HostPage() {
               </p>
             ) : null}
 
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-slate-900">
-                Prioritized viewer chat
-              </p>
-              <p className="text-xs font-medium text-slate-500">
-                Active SKU first
-              </p>
-            </div>
-            <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-1">
-              {prioritizedViewerChats.map((chat) => (
-                <div
-                  className={`rounded-md border p-3 ${
-                    chat.isProductRelated
-                      ? "border-teal-200 bg-teal-50"
-                      : chat.frequency > 1
-                        ? "border-amber-200 bg-amber-50"
-                        : chat.isLive
-                          ? "border-slate-200 bg-white"
-                          : "border-slate-200 bg-slate-50"
-                  }`}
-                  key={chat.id}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p
-                      className={`text-xs font-semibold ${
-                        chat.isProductRelated ? "text-teal-700" : "text-slate-500"
-                      }`}
-                    >
-                      {chat.viewer}
-                    </p>
-                    {chat.isProductRelated ? (
-                      <span className="rounded-sm bg-teal-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-teal-700">
-                        Active SKU
-                      </span>
-                    ) : chat.frequency > 1 ? (
-                      <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-700">
-                        Asked {chat.frequency}x
-                      </span>
-                    ) : null}
-                  </div>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {chat.text}
-                  </p>
-                </div>
-              ))}
-              {prioritizedViewerChats.length === 0 ? (
-                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
-                  No viewer chat needs host attention.
-                </p>
-              ) : null}
-            </div>
-
-            <div className="mt-4 flex items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-slate-900">Latest queue</p>
-              {hiddenViewerCommentCount > 0 ? (
-                <p className="text-xs font-medium text-slate-500">
-                  {hiddenViewerCommentCount} more archived
-                </p>
-              ) : null}
-            </div>
-            <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-1">
-              {recentViewerComments.map((comment) => (
-                <ViewerCommentCard
-                  comment={comment}
-                  ignored={ignoredDraftIds.includes(comment.id)}
-                  key={comment.id}
-                  onIgnore={() => handleIgnoreDraft(comment.id)}
-                  onUseReply={handleUseDraftReply}
-                />
-              ))}
-              {recentViewerComments.length === 0 ? (
-                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
-                  No queued viewer comments yet.
-                </p>
-              ) : null}
-            </div>
         </Panel>
 
         <div className="grid gap-4 xl:col-start-3 xl:col-span-2 xl:row-span-2 xl:min-h-0 xl:grid-cols-[1.35fr_0.9fr]">
@@ -2553,30 +2530,32 @@ export default function HostPage() {
           className="xl:col-start-3 xl:col-span-2 xl:row-start-3"
         >
             <div className="space-y-3">
-              {conciergeEscalations.map((pending) => {
-                const draftReply =
-                  editedEscalationReplies[pending.id] ??
-                  pending.action.reply_text ??
-                  "";
-
-                return (
-                  <div
-                    className="rounded-md border border-amber-300 bg-amber-50 p-3"
-                    key={pending.id}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <p className="text-sm font-semibold text-slate-950">
-                        Escalated
-                      </p>
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-slate-950">
+                    Escalated
+                  </p>
+                  {activeInteractionCue ? (
+                    activeCueResolving ? (
+                      <span className="animate-pulse rounded-md border border-emerald-200 bg-emerald-50 px-3 py-1 text-sm font-semibold text-emerald-700">
+                        ✓ Resolved
+                      </span>
+                    ) : (
                       <StatusPill tone="warning">Host review</StatusPill>
-                    </div>
+                    )
+                  ) : (
+                    <StatusPill tone="neutral">No active cue</StatusPill>
+                  )}
+                </div>
+                {activeInteractionCue ? (
+                  <>
                     <div className="mt-3 space-y-2 text-sm leading-6">
                       <div>
                         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                           Viewer question
                         </p>
                         <p className="text-slate-800">
-                          {pending.action.source_text}
+                          {activeInteractionCue.text}
                         </p>
                       </div>
                       <div>
@@ -2584,99 +2563,191 @@ export default function HostPage() {
                           Reason
                         </p>
                         <p className="text-slate-800">
-                          {pending.guardrail_result.reason}
+                          {activeEscalationReason}
                         </p>
                       </div>
+                      {activeCueResolving ? (
+                        <div className="animate-pulse rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 text-sm font-semibold text-emerald-700">
+                          ✓ Resolved. Removing this question from the queue.
+                        </div>
+                      ) : null}
                       <label className="block">
                         <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                           Draft reply
                         </span>
                         <textarea
                           className="mt-1 min-h-24 w-full resize-y rounded-md border border-amber-200 bg-white p-3 text-sm leading-6 outline-none transition focus:border-teal-500"
-                          onChange={(event) =>
-                            setEditedEscalationReplies((currentReplies) => ({
+                          onChange={(event) => {
+                            if (activeConciergeEscalation) {
+                              setEditedEscalationReplies((currentReplies) => ({
+                                ...currentReplies,
+                                [activeConciergeEscalation.id]: event.target.value,
+                              }));
+                              return;
+                            }
+                            setInteractionDraftReplies((currentReplies) => ({
                               ...currentReplies,
-                              [pending.id]: event.target.value,
-                            }))
-                          }
-                          value={draftReply}
+                              [activeInteractionCue.id]: event.target.value,
+                            }));
+                          }}
+                          value={activeEscalationDraft}
                         />
                       </label>
                     </div>
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <button
-                        className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
-                        disabled={resolvingActionId === pending.id}
-                        onClick={() => void handleAcceptEscalation(pending.id)}
-                        type="button"
-                      >
-                        Accept
-                      </button>
-                      <button
-                        className="min-h-10 rounded-md border border-teal-200 bg-white px-3 text-sm font-semibold text-teal-800 transition hover:border-teal-400"
-                        disabled={
-                          !draftReply.trim() || resolvingActionId === pending.id
-                        }
-                        onClick={() =>
-                          void handleSendEditedEscalation(pending.id)
-                        }
-                        type="button"
-                      >
-                        Send edited
-                      </button>
-                      <button
-                        className="min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                        disabled={resolvingActionId === pending.id}
-                        onClick={() => void handleDiscardEscalation(pending.id)}
-                        type="button"
-                      >
-                        Discard
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-
-              <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-3">
-                {liveRoomMessages.length ? (
-                  liveRoomMessages.map((message) => {
-                    const isViewer = message.sender === "viewer";
-                    const isAgent = message.sender === "agent";
-
-                    return (
-                      <div
-                        className={`rounded-md border bg-white p-3 ${
-                          isViewer
-                            ? "border-slate-200"
-                            : isAgent
-                              ? "border-teal-200"
-                              : "border-slate-200"
-                        }`}
-                        key={message.id}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <p
-                            className={`text-xs font-semibold uppercase tracking-wide ${
-                              isAgent ? "text-teal-700" : "text-slate-500"
-                            }`}
+                      {activeConciergeEscalation ? (
+                        <>
+                          <button
+                            className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                            disabled={
+                              activeCueResolving ||
+                              resolvingActionId === activeConciergeEscalation.id
+                            }
+                            onClick={() =>
+                              void handleAcceptEscalation(
+                                activeConciergeEscalation.id,
+                                activeInteractionCue.groupedCommentIds,
+                              )
+                            }
+                            type="button"
                           >
-                            {message.name}
-                          </p>
-                          <StatusPill tone={isAgent ? "good" : "neutral"}>
-                            {message.sender}
-                          </StatusPill>
-                        </div>
-                        <p className="mt-1 text-sm leading-6 text-slate-800">
-                          {message.text}
-                        </p>
-                      </div>
-                    );
-                  })
+                            Accept
+                          </button>
+                          <button
+                            className="min-h-10 rounded-md border border-teal-200 bg-white px-3 text-sm font-semibold text-teal-800 transition hover:border-teal-400"
+                            disabled={
+                              activeCueResolving ||
+                              !activeEscalationDraft.trim() ||
+                              resolvingActionId === activeConciergeEscalation.id
+                            }
+                            onClick={() =>
+                              void handleSendEditedEscalation(
+                                activeConciergeEscalation.id,
+                                activeInteractionCue.groupedCommentIds,
+                              )
+                            }
+                            type="button"
+                          >
+                            Send edited
+                          </button>
+                          <button
+                            className="min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                            disabled={
+                              activeCueResolving ||
+                              resolvingActionId === activeConciergeEscalation.id
+                            }
+                            onClick={() =>
+                              void handleDiscardEscalation(
+                                activeConciergeEscalation.id,
+                              )
+                            }
+                            type="button"
+                          >
+                            Discard
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                            disabled={activeCueResolving || !activeEscalationDraft.trim()}
+                            onClick={() =>
+                              handleUseDraftReply(
+                                activeEscalationDraft,
+                                activeInteractionCue.groupedCommentIds,
+                              )
+                            }
+                            type="button"
+                          >
+                            Adopt
+                          </button>
+                          <button
+                            className="min-h-10 rounded-md border border-teal-200 bg-white px-3 text-sm font-semibold text-teal-800 transition hover:border-teal-400"
+                            disabled={activeCueResolving}
+                            onClick={() =>
+                              handleMarkInteractionAnswered(
+                                activeInteractionCue.groupedCommentIds,
+                              )
+                            }
+                            type="button"
+                          >
+                            Answered
+                          </button>
+                          <button
+                            className="min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                            disabled={activeCueResolving}
+                            onClick={() =>
+                              handleDeferInteractionCue(
+                                activeInteractionCue.groupedCommentIds,
+                              )
+                            }
+                            type="button"
+                          >
+                            Later
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </>
                 ) : (
-                  <p className="text-sm leading-6 text-slate-500">
-                    No viewer room replies yet.
+                  <p className="mt-3 rounded-md border border-amber-200 bg-white px-3 py-4 text-sm text-slate-500">
+                    New unanswered viewer questions will appear here for host review.
                   </p>
                 )}
+              </div>
+
+              <div className="max-w-xl rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-slate-900">
+                    Waiting queue
+                  </p>
+                </div>
+                <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-2 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300">
+                  {recentViewerComments.map((comment) => (
+                    <button
+                      className={`w-full rounded-md border p-3 text-left transition hover:border-teal-300 hover:bg-white ${
+                        comment.isProductRelated
+                          ? "border-teal-200 bg-teal-50"
+                          : comment.frequency > 1
+                            ? "border-amber-200 bg-amber-50"
+                            : "border-slate-200 bg-white"
+                      }`}
+                      key={comment.id}
+                      onClick={() => handleSelectWaitingComment(comment)}
+                      type="button"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p
+                          className={`text-xs font-semibold ${
+                            comment.isProductRelated ? "text-teal-700" : "text-slate-500"
+                          }`}
+                        >
+                          {comment.viewer}
+                        </p>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {comment.isProductRelated ? (
+                            <span className="rounded-sm bg-teal-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-teal-700">
+                              Active SKU
+                            </span>
+                          ) : null}
+                          {comment.frequency > 1 ? (
+                            <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-700">
+                              Asked {comment.frequency}x
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <p className="mt-1 text-sm leading-6 text-slate-800">
+                        {comment.text}
+                      </p>
+                    </button>
+                  ))}
+                  {recentViewerComments.length === 0 ? (
+                    <p className="rounded-md border border-slate-200 bg-white px-3 py-4 text-sm text-slate-500">
+                      No viewer questions need host review.
+                    </p>
+                  ) : null}
+                </div>
               </div>
             </div>
 
