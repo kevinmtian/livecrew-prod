@@ -55,6 +55,14 @@ type QueueItem = {
   status: "Draft" | "Review" | "Blocked";
 };
 
+type HostInputTrace = {
+  id: string;
+  timestamp: number;
+  text: string;
+  source: "speech_transcript" | "typed_command";
+  matchedEntity: string | null;
+};
+
 type LiveTranscriptLine = {
   id: string;
   text: string;
@@ -71,6 +79,44 @@ type RealtimeTranscriptionEvent = {
     message?: string;
   };
 };
+
+type AgentRole =
+  | "Input"
+  | "Co-Host"
+  | "Concierge"
+  | "Guardrail"
+  | "Commerce"
+  | "System";
+
+type AgentFlowStepKind =
+  | "input"
+  | "intent"
+  | "routing"
+  | "tool"
+  | "decision"
+  | "action"
+  | "reflection";
+
+type AgentFlowNodeState = "done" | "active" | "waiting";
+
+type AgentFlowNode = {
+  id: string;
+  role: AgentRole;
+  stepKind: AgentFlowStepKind;
+  label: string;
+  detail: string;
+  metric?: string;
+  state: AgentFlowNodeState;
+};
+
+type AgentFlowModel = {
+  title: string;
+  summary: string;
+  modeLabel: string;
+  nodes: AgentFlowNode[];
+};
+
+type AgentFlowNodeDraft = Omit<AgentFlowNode, "state">;
 
 const initialLedger: LedgerEvent[] = [
   {
@@ -150,6 +196,599 @@ function describePendingAction(pending: PendingAction, state: BackendState | nul
   return details.join(" · ");
 }
 
+function clampText(value: string | null | undefined, fallback = "No detail") {
+  const normalized = value?.trim();
+  if (!normalized) {
+    return fallback;
+  }
+  return normalized.length > 120 ? `${normalized.slice(0, 117)}...` : normalized;
+}
+
+function inferMatchedSkuName(text: string, state: BackendState | null) {
+  const normalized = text.toLowerCase();
+  return (
+    state?.skus.find((sku) =>
+      [sku.name, ...sku.aliases].some((name) =>
+        normalized.includes(name.toLowerCase()),
+      ),
+    )?.name ?? null
+  );
+}
+
+function actionLabel(actionType: string | null | undefined) {
+  if (!actionType || actionType === "noop") {
+    return "No action";
+  }
+  return actionType.replaceAll("_", " ");
+}
+
+function toolLabelForAction(actionType: string | null | undefined) {
+  if (actionType === "create_order") {
+    return "check_stock + place_order";
+  }
+  if (actionType === "suggest_reply") {
+    return "get_product_facts";
+  }
+  if (
+    actionType === "set_active_sku" ||
+    actionType === "update_price" ||
+    actionType === "update_stock"
+  ) {
+    return actionType;
+  }
+  if (actionType === "create_flash_sale") {
+    return "create_flash_sale";
+  }
+  if (actionType === "request_host_confirmation") {
+    return "validate_claims";
+  }
+  return "resolve_context";
+}
+
+function withFlowStates(
+  nodesWithoutState: AgentFlowNodeDraft[],
+  activeIndex: number,
+): AgentFlowNode[] {
+  return nodesWithoutState.map((node, index) => ({
+    ...node,
+    state:
+      index < activeIndex ? "done" : index === activeIndex ? "active" : "waiting",
+  }));
+}
+
+function buildViewerEscalationFlow(
+  pending: PendingAction,
+  state: BackendState | null,
+): AgentFlowModel {
+  const skuName =
+    state?.skus.find((sku) => sku.id === pending.action.sku_id)?.name ??
+    pending.action.sku_id ??
+    "No resolved context";
+  const nodes = withFlowStates(
+    [
+      {
+        id: "viewer-input",
+        role: "Input",
+        stepKind: "input",
+        label: pending.action.viewer ?? "viewer",
+        detail: clampText(pending.action.source_text),
+      },
+      {
+        id: "viewer-intent",
+        role: "Concierge",
+        stepKind: "intent",
+        label: "Risk request",
+        detail: clampText(pending.action.reason, "Needs host review"),
+        metric: `${Math.round(pending.action.confidence * 100)}%`,
+      },
+      {
+        id: "viewer-routing",
+        role: "Guardrail",
+        stepKind: "routing",
+        label: "Escalate",
+        detail: `Context: ${skuName}`,
+      },
+      {
+        id: "viewer-tool",
+        role: "Guardrail",
+        stepKind: "tool",
+        label: "validate_claims",
+        detail: "Discount, safety, and unsupported claims checked.",
+      },
+      {
+        id: "viewer-decision",
+        role: "Guardrail",
+        stepKind: "decision",
+        label: "Host review",
+        detail: pending.guardrail_result.reason,
+      },
+      {
+        id: "viewer-action",
+        role: "Concierge",
+        stepKind: "action",
+        label: "Draft reply",
+        detail: clampText(pending.action.reply_text, "Waiting for host action"),
+      },
+      {
+        id: "viewer-reflection",
+        role: "System",
+        stepKind: "reflection",
+        label: "Trace",
+        detail: "Pending action is stored in backend state.",
+      },
+    ],
+    5,
+  );
+
+  return {
+    title: "Viewer escalation flow",
+    summary: "Concierge drafted a guarded reply and routed it to host review.",
+    modeLabel: "Live state",
+    nodes,
+  };
+}
+
+function buildViewerMessageFlow(
+  roomState: LocalRoomState,
+  state: BackendState | null,
+): AgentFlowModel | null {
+  const latestMessage = roomState.viewerMessages.at(-1);
+  if (!latestMessage) {
+    return null;
+  }
+  const relatedReply = [...roomState.replies]
+    .reverse()
+    .find((reply) => reply.createdAt >= latestMessage.createdAt);
+  const skuName =
+    inferMatchedSkuName(latestMessage.text, state) ??
+    (state?.active_sku_id
+      ? state.skus.find((sku) => sku.id === state.active_sku_id)?.name
+      : null);
+  const hasReply = Boolean(relatedReply);
+  const looksRisky = /\b(discount|promo|allergy|heart|skin|health|rash)\b/i.test(
+    latestMessage.text,
+  );
+  const nodes = withFlowStates(
+    [
+      {
+        id: "viewer-input",
+        role: "Input",
+        stepKind: "input",
+        label: latestMessage.name,
+        detail: clampText(latestMessage.text),
+      },
+      {
+        id: "viewer-intent",
+        role: "Concierge",
+        stepKind: "intent",
+        label: looksRisky ? "Risk sensitive" : "Viewer question",
+        detail: looksRisky ? "Policy-sensitive wording detected." : "Message ready for reply analysis.",
+      },
+      {
+        id: "viewer-context",
+        role: "Concierge",
+        stepKind: "routing",
+        label: skuName ? "SKU context" : "No context",
+        detail: skuName ?? "No resolved product context",
+      },
+      {
+        id: "viewer-tool",
+        role: looksRisky ? "Guardrail" : "Concierge",
+        stepKind: "tool",
+        label: looksRisky ? "validate_claims" : "get_product_facts",
+        detail: looksRisky ? "Guardrail checks claim risk." : "Catalogue facts are the source.",
+      },
+      {
+        id: "viewer-decision",
+        role: looksRisky ? "Guardrail" : "Concierge",
+        stepKind: "decision",
+        label: hasReply ? "Reply ready" : "Awaiting result",
+        detail: hasReply
+          ? clampText(relatedReply?.text)
+          : "No reply or escalation has been recorded yet.",
+      },
+      {
+        id: "viewer-action",
+        role: hasReply ? "Concierge" : "System",
+        stepKind: "action",
+        label: hasReply ? "Reply sent" : "No action yet",
+        detail: hasReply ? "Viewer room received agent reply." : "Waiting for backend response.",
+      },
+      {
+        id: "viewer-reflection",
+        role: "System",
+        stepKind: "reflection",
+        label: "Trace",
+        detail: "Derived from viewer room messages and backend state.",
+      },
+    ],
+    hasReply ? 6 : 4,
+  );
+
+  return {
+    title: "Viewer message flow",
+    summary: "Latest viewer message is mapped through Concierge and guardrails.",
+    modeLabel: "Live state",
+    nodes,
+  };
+}
+
+function buildHostInputFlow(
+  trace: HostInputTrace,
+  queueItems: QueueItem[],
+  state: BackendState | null,
+): AgentFlowModel {
+  const latestQueue = queueItems[0];
+  const latestLedger = state?.ledger[0];
+  const matchedSku = trace.matchedEntity ?? inferMatchedSkuName(trace.text, state);
+  const actionType = latestLedger?.payload?.action;
+  const ledgerActionType =
+    typeof actionType === "object" && actionType && "type" in actionType
+      ? String(actionType.type)
+      : latestQueue?.title;
+  const activeIndex = latestLedger ? 6 : latestQueue ? 5 : 3;
+
+  return {
+    title: "Host input flow",
+    summary:
+      trace.source === "speech_transcript"
+        ? "Final transcript entered the CoHost Agent workflow."
+        : "Typed command entered the CoHost Agent workflow.",
+    modeLabel: trace.source === "speech_transcript" ? "Transcript" : "Command",
+    nodes: withFlowStates(
+      [
+        {
+          id: "host-input",
+          role: "Input",
+          stepKind: "input",
+          label: trace.source === "speech_transcript" ? "Speech" : "Typed command",
+          detail: clampText(trace.text),
+        },
+        {
+          id: "host-intent",
+          role: "Co-Host",
+          stepKind: "intent",
+          label: matchedSku ? "Product command" : "Host command",
+          detail: matchedSku ? `Matched ${matchedSku}` : "Intent parsed from host input.",
+        },
+        {
+          id: "host-routing",
+          role: "Co-Host",
+          stepKind: "routing",
+          label: "Route to CoHost",
+          detail: "Host operations route owns shelf and promo actions.",
+        },
+        {
+          id: "host-tool",
+          role: "Commerce",
+          stepKind: "tool",
+          label: toolLabelForAction(ledgerActionType),
+          detail: matchedSku ? `Context: ${matchedSku}` : "Use current backend state.",
+        },
+        {
+          id: "host-decision",
+          role: "Guardrail",
+          stepKind: "decision",
+          label: latestQueue?.status ?? "Decision ready",
+          detail: latestQueue?.detail ?? "Waiting for structured action.",
+        },
+        {
+          id: "host-action",
+          role: "Commerce",
+          stepKind: "action",
+          label: latestLedger ? actionLabel(latestLedger.type) : "Pending action",
+          detail: latestLedger?.detail ?? "No visible state update yet.",
+        },
+        {
+          id: "host-reflection",
+          role: "System",
+          stepKind: "reflection",
+          label: "Ledger",
+          detail: latestLedger ? "Backend ledger recorded the result." : "Awaiting ledger event.",
+        },
+      ],
+      activeIndex,
+    ),
+  };
+}
+
+function buildFlashSaleFlow(state: BackendState): AgentFlowModel | null {
+  if (!state.flash_sale) {
+    return null;
+  }
+  const sku = state.skus.find((item) => item.id === state.flash_sale?.sku_id);
+  return {
+    title: "Flash sale flow",
+    summary: "Active backend campaign state is being tracked by commerce.",
+    modeLabel: "Commerce",
+    nodes: withFlowStates(
+      [
+        {
+          id: "flash-input",
+          role: "Input",
+          stepKind: "input",
+          label: "Campaign state",
+          detail: sku?.name ?? state.flash_sale.sku_id,
+        },
+        {
+          id: "flash-intent",
+          role: "Co-Host",
+          stepKind: "intent",
+          label: "Promo active",
+          detail: `${formatPrice(state.flash_sale.sale_price_cents)} flash price`,
+        },
+        {
+          id: "flash-route",
+          role: "Commerce",
+          stepKind: "routing",
+          label: "Commerce state",
+          detail: "Flash sale is stored in backend state.",
+        },
+        {
+          id: "flash-tool",
+          role: "Commerce",
+          stepKind: "tool",
+          label: "create_flash_sale",
+          detail: `${state.flash_sale.remaining_stock}/${state.flash_sale.stock_limit} sale units left`,
+        },
+        {
+          id: "flash-action",
+          role: "Commerce",
+          stepKind: "action",
+          label: "Shelf updated",
+          detail: `Duration ${state.flash_sale.duration_seconds}s`,
+        },
+        {
+          id: "flash-reflection",
+          role: "System",
+          stepKind: "reflection",
+          label: "Ledger",
+          detail: "Producer report will read flash-sale ledger events.",
+        },
+      ],
+      4,
+    ),
+  };
+}
+
+function buildIdleFlow(
+  backendStatus: "checking" | "online" | "offline",
+  streamStatus: "offline" | "starting" | "live",
+): AgentFlowModel {
+  return {
+    title: "Idle workflow",
+    summary: "No recent agent event is active. The system is ready for input.",
+    modeLabel: "Idle",
+    nodes: withFlowStates(
+      [
+        {
+          id: "idle-input",
+          role: "Input",
+          stepKind: "input",
+          label: streamStatus === "live" ? "Listening" : "Ready",
+          detail: `Backend ${backendStatus}; stream ${streamStatus}.`,
+        },
+        {
+          id: "idle-intent",
+          role: "System",
+          stepKind: "intent",
+          label: "Intent ready",
+          detail: "Waiting for viewer message, host transcript, or command.",
+        },
+        {
+          id: "idle-route",
+          role: "System",
+          stepKind: "routing",
+          label: "Routing ready",
+          detail: "Next input will route to the matching agent.",
+        },
+        {
+          id: "idle-tool",
+          role: "System",
+          stepKind: "tool",
+          label: "Tools ready",
+          detail: "Catalogue, guardrails, and commerce state are available.",
+        },
+        {
+          id: "idle-decision",
+          role: "System",
+          stepKind: "decision",
+          label: "Decision ready",
+          detail: "No action proposed.",
+        },
+      ],
+      0,
+    ),
+  };
+}
+
+function buildAgentFlow({
+  backendState,
+  roomState,
+  hostInputTrace,
+  queueItems,
+  backendStatus,
+  streamStatus,
+}: {
+  backendState: BackendState | null;
+  roomState: LocalRoomState;
+  hostInputTrace: HostInputTrace | null;
+  queueItems: QueueItem[];
+  backendStatus: "checking" | "online" | "offline";
+  streamStatus: "offline" | "starting" | "live";
+}): AgentFlowModel {
+  const pendingConciergeEscalation = backendState?.pending_actions.find(
+    (pending) =>
+      pending.status === "pending" &&
+      pending.requested_by === "concierge" &&
+      pending.action.type === "suggest_reply",
+  );
+  if (pendingConciergeEscalation) {
+    return buildViewerEscalationFlow(pendingConciergeEscalation, backendState);
+  }
+
+  const latestViewerMessage = roomState.viewerMessages.at(-1);
+  const latestViewerTime = latestViewerMessage?.createdAt ?? 0;
+  const latestHostTime = hostInputTrace?.timestamp ?? 0;
+  if (latestViewerMessage && latestViewerTime >= latestHostTime) {
+    const viewerFlow = buildViewerMessageFlow(roomState, backendState);
+    if (viewerFlow) {
+      return viewerFlow;
+    }
+  }
+
+  if (hostInputTrace) {
+    return buildHostInputFlow(hostInputTrace, queueItems, backendState);
+  }
+
+  if (backendState) {
+    const flashSaleFlow = buildFlashSaleFlow(backendState);
+    if (flashSaleFlow) {
+      return flashSaleFlow;
+    }
+  }
+
+  return buildIdleFlow(backendStatus, streamStatus);
+}
+
+const roleToneClass: Record<AgentRole, string> = {
+  Input: "border-slate-200 bg-slate-50 text-slate-700",
+  "Co-Host": "border-teal-200 bg-teal-50 text-teal-800",
+  Concierge: "border-indigo-200 bg-indigo-50 text-indigo-800",
+  Guardrail: "border-amber-200 bg-amber-50 text-amber-800",
+  Commerce: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  System: "border-slate-200 bg-white text-slate-600",
+};
+
+const stepMarkerClass: Record<AgentFlowStepKind, string> = {
+  input: "rounded-md",
+  intent: "rotate-45 rounded-sm",
+  routing: "rounded-full",
+  tool: "[clip-path:polygon(25%_0%,75%_0%,100%_50%,75%_100%,25%_100%,0%_50%)]",
+  decision: "rotate-45 rounded-sm",
+  action: "rounded-md",
+  reflection: "rounded-full px-4",
+};
+
+function AgentFlowPanel({ flow }: { flow: AgentFlowModel }) {
+  const activeNode =
+    flow.nodes.find((node) => node.state === "active") ??
+    flow.nodes[flow.nodes.length - 1];
+  const completedCount = flow.nodes.filter((node) => node.state === "done").length;
+  const roles = Array.from(new Set(flow.nodes.map((node) => node.role)));
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-950">{flow.title}</p>
+          <p className="mt-1 line-clamp-2 text-sm leading-6 text-slate-600">
+            {flow.summary}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {roles.map((role) => (
+            <span
+              className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${roleToneClass[role]}`}
+              key={role}
+            >
+              {role}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="mt-4 min-h-0 flex-1 overflow-x-auto overflow-y-hidden rounded-md border border-slate-200 bg-slate-50 p-3">
+        <div className="flex h-full min-w-max items-stretch gap-3">
+          {flow.nodes.map((node, index) => {
+            const stateClass =
+              node.state === "active"
+                ? "border-teal-400 bg-white shadow-sm ring-2 ring-teal-100"
+                : node.state === "done"
+                  ? "border-slate-200 bg-white"
+                  : "border-slate-200 bg-white/60 opacity-60";
+            const markerClass = stepMarkerClass[node.stepKind];
+
+            return (
+              <div className="flex items-center gap-3" key={node.id}>
+                <div
+                  className={`flex h-full w-44 shrink-0 flex-col rounded-md border p-3 ${stateClass}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span
+                      className={`rounded-md border px-2 py-1 text-[11px] font-semibold ${roleToneClass[node.role]}`}
+                    >
+                      {node.role}
+                    </span>
+                    <span className="text-[11px] font-semibold uppercase text-slate-400">
+                      {node.state}
+                    </span>
+                  </div>
+                  <div className="mt-3 flex items-center gap-2">
+                    <span
+                      className={`flex h-8 min-w-8 items-center justify-center border border-slate-300 bg-slate-100 text-[10px] font-bold uppercase text-slate-600 ${markerClass}`}
+                    >
+                      <span
+                        className={
+                          node.stepKind === "intent" || node.stepKind === "decision"
+                            ? "-rotate-45"
+                            : ""
+                        }
+                      >
+                        {node.stepKind.slice(0, 2)}
+                      </span>
+                    </span>
+                    <p className="truncate text-xs font-semibold uppercase text-slate-500">
+                      {node.stepKind}
+                    </p>
+                  </div>
+                  <p className="mt-3 line-clamp-2 text-sm font-semibold leading-5 text-slate-950">
+                    {node.label}
+                  </p>
+                  <p className="mt-2 line-clamp-4 text-xs leading-5 text-slate-600">
+                    {node.detail}
+                  </p>
+                  {node.metric ? (
+                    <p className="mt-auto pt-2 text-xs font-semibold text-teal-700">
+                      {node.metric}
+                    </p>
+                  ) : null}
+                </div>
+                {index < flow.nodes.length - 1 ? (
+                  <span className="text-xl font-semibold text-slate-300">-&gt;</span>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-2 text-xs text-slate-600 sm:grid-cols-4">
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+          <span className="block font-semibold text-slate-500">Current flow</span>
+          <span className="mt-1 block truncate text-slate-950">{flow.modeLabel}</span>
+        </div>
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+          <span className="block font-semibold text-slate-500">Active node</span>
+          <span className="mt-1 block truncate text-slate-950">
+            {activeNode?.label ?? "None"}
+          </span>
+        </div>
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+          <span className="block font-semibold text-slate-500">Completed</span>
+          <span className="mt-1 block text-slate-950">
+            {completedCount}/{flow.nodes.length}
+          </span>
+        </div>
+        <div className="rounded-md border border-slate-200 bg-white px-3 py-2">
+          <span className="block font-semibold text-slate-500">Trace source</span>
+          <span className="mt-1 block truncate text-slate-950">Live state</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function HostPage() {
   const [commandInput, setCommandInput] = useState(
     "Switch to the Bamboo Thermal Tumbler.",
@@ -176,6 +815,7 @@ export default function HostPage() {
     },
   ]);
   const [mediaSessionId, setMediaSessionId] = useState<string | null>(null);
+  const [hostInputTrace, setHostInputTrace] = useState<HostInputTrace | null>(null);
   const [streamStatus, setStreamStatus] = useState<
     "offline" | "starting" | "live"
   >("offline");
@@ -227,6 +867,14 @@ export default function HostPage() {
         ),
     ) ??
     [];
+  const agentFlow = buildAgentFlow({
+    backendState,
+    roomState,
+    hostInputTrace,
+    queueItems,
+    backendStatus,
+    streamStatus,
+  });
 
   function closeViewerPeers() {
     viewerPeersRef.current.forEach((peer) => peer.close());
@@ -310,6 +958,13 @@ export default function HostPage() {
     }
 
     appendLiveTranscriptLine(trimmedText, "final");
+    setHostInputTrace({
+      id: `host-speech-${Date.now()}`,
+      timestamp: Date.now(),
+      text: trimmedText,
+      source: "speech_transcript",
+      matchedEntity: inferMatchedSkuName(trimmedText, backendState),
+    });
     try {
       const response = await sendHostTranscript(trimmedText);
       applyWorkflowResponse(response);
@@ -595,6 +1250,13 @@ export default function HostPage() {
       return;
     }
 
+    setHostInputTrace({
+      id: `host-command-${Date.now()}`,
+      timestamp: Date.now(),
+      text,
+      source: "typed_command",
+      matchedEntity: inferMatchedSkuName(text, backendState),
+    });
     try {
       const response = await sendHostCommand(text);
       applyWorkflowResponse(response);
@@ -656,6 +1318,7 @@ export default function HostPage() {
     setLiveTranscriptLines([]);
     setInterimTranscript("");
     setLiveTranscriptError("");
+    setHostInputTrace(null);
     setLedgerEvents(initialLedger);
     setQueueItems([
       {
@@ -1449,6 +2112,15 @@ export default function HostPage() {
                 Send reply
               </button>
             </form>
+        </Panel>
+
+        <Panel
+          title="Live internal flow"
+          eyebrow="Agent workflow"
+          className="h-[500px] xl:col-span-4 xl:flex xl:flex-col"
+          contentClassName="flex min-h-0 flex-1 flex-col"
+        >
+          <AgentFlowPanel flow={agentFlow} />
         </Panel>
       </div>
     </AppShell>
