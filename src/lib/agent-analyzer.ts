@@ -208,15 +208,11 @@ function classifyIntent(normalizedMessage: string): ViewerIntent {
   }
 
   if (
-    /\b(allergy|allergic|rash|pregnant|pregnancy|eczema|acne|sensitive skin|safe for skin|dermatologist|medical|cure|treat)\b/.test(
+    /\b(allergy|allergic|rash|pregnant|pregnancy|eczema|acne|sensitive skin|skin is sensitive|safe for skin|dermatologist|medical|cure|treat)\b/.test(
       normalizedMessage,
     )
   ) {
     return "skin_safety";
-  }
-
-  if (isOrderIntent(normalizedMessage)) {
-    return "order";
   }
 
   if (
@@ -225,6 +221,10 @@ function classifyIntent(normalizedMessage: string): ViewerIntent {
     )
   ) {
     return "promo_request";
+  }
+
+  if (isOrderIntent(normalizedMessage)) {
+    return "order";
   }
 
   if (
@@ -257,7 +257,7 @@ function classifyIntent(normalizedMessage: string): ViewerIntent {
 
   if (
     hasQuestionShape(normalizedMessage) &&
-    /\b(ingredients|size|capacity|finish|refill|strap|light|morning|routine|use|facts|details|stock|left|spf)\b/.test(
+    /\b(ingredients|size|capacity|finish|refill|refillable|strap|light|morning|routine|use|facts|details|stock|left|spf)\b/.test(
       normalizedMessage,
     )
   ) {
