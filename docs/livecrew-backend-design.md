@@ -680,7 +680,7 @@ POST /media/session/{session_id}/ice-candidate
 DELETE /media/session/{session_id}
 ```
 
-`/api/eval/run-agent-suite` is the intended app route. If the Python backend is running, the Next.js route may proxy to an internal FastAPI `/eval/run-agent-suite` endpoint.
+`/api/eval/run-agent-suite` is the intended app route. The route must be read-only and isolated from live chat, host state, order state, event ledger writes, and production queues. It should use local deterministic analyzer behavior for regression scoring so the evaluation page can open without an OpenAI API key. If the Python backend is running, the Next.js route may proxy to an internal FastAPI `/eval/run-agent-suite` endpoint only if that backend endpoint is equally read-only.
 
 Local FastAPI CORS should allow the primary Next.js dev origin `localhost:3000` and the fallback origin `localhost:3001`, including `127.0.0.1` variants, so the demo remains usable when one dev port is already occupied.
 
@@ -1128,7 +1128,7 @@ Categories:
 - Pricing and Promotion Updates
 - Judge Free-Form Stress
 
-Each category should eventually contain at least 10 representative cases.
+Each displayed category should contain at least 10 representative cases, and the `/agent_evaluation` page should let every category summary card expand or collapse its own aligned sample table without touching production runtime flows.
 
 Evaluation output should include:
 

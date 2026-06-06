@@ -154,6 +154,8 @@ Each capability should be inspectable and testable.
 Requirements:
 
 - Deterministic evaluation cases should exist for agent routing, SKU grounding, guardrail decisions, and commerce execution.
+- The `/agent_evaluation` page should run an isolated read-only suite through `/api/eval/run-agent-suite`, using local deterministic analyzer behavior without writing to live chat, host state, order state, backend ledger, or production queues.
+- Each `/agent_evaluation` category card should expand and collapse its own testing samples directly under that card, so summary cards and detailed case tables stay visually aligned. Each displayed evaluation category should include at least 10 representative and diverse samples covering common edge cases.
 - Ledger entries should explain why an action was applied, blocked, or escalated.
 - Internal `noop` decisions should not be shown in the host ledger because they are non-events, not evidence of an applied, blocked, or escalated commerce action.
 - Agent outputs should include confidence, reason, and evidence.
