@@ -30,6 +30,18 @@ FLASH_RE = re.compile(
     r"first\s+(\d+)\s+(?:buyers|orders|people)?.*?(?:at|for)\s+\$?(\d+(?:\.\d{1,2})?).*?(\d+)\s+minutes?",
     re.IGNORECASE | re.DOTALL,
 )
+CN_FLASH_DURATION_RE = re.compile(
+    r"(?:限时|倒计时|for)\D{0,8}(\d+)\s*(?:分钟|分|min|minutes?)",
+    re.IGNORECASE,
+)
+CN_FLASH_PRICE_RE = re.compile(
+    r"(?:限价|秒杀价|促销价|优惠价|price)\D{0,8}(\d+(?:\.\d{1,2})?)\s*(?:元|块|dollars?)?",
+    re.IGNORECASE,
+)
+CN_FLASH_LIMIT_RE = re.compile(
+    r"(?:限量|限\s*)\D{0,8}(\d+)\s*(?:个|件|单|orders?|units?)?",
+    re.IGNORECASE,
+)
 STOCK_RE = re.compile(
     r"(?:stock|inventory|units)\D{0,24}(\d+)",
     re.IGNORECASE,
@@ -553,6 +565,7 @@ def _analyze_host_text_deterministic(
         )
 
     flash_match = FLASH_RE.search(text)
+    cn_flash_fields = _extract_cn_flash_fields(text)
     stock_match = STOCK_RE.search(text)
     if contextual_sku and flash_match:
         stock_limit, price_text, minutes_text = flash_match.groups()
@@ -570,6 +583,22 @@ def _analyze_host_text_deterministic(
                 evidence=[flash_match.group(0)],
             )
         )
+    elif contextual_sku and cn_flash_fields:
+        minutes, price_text, stock_limit = cn_flash_fields
+        actions.append(
+            ProposedAction(
+                type="create_flash_sale",
+                sku_id=contextual_sku.id,
+                sale_price_cents=cents_from_text(price_text),
+                stock_limit=stock_limit,
+                duration_seconds=minutes * 60,
+                source_text=text,
+                input_source=input_source,
+                confidence=0.86,
+                reason="Host specified a Chinese mixed-language flash sale command.",
+                evidence=["限时", "限价", "限量"],
+            )
+        )
     elif "cancel" in lower_text and ("flash" in lower_text or "deal" in lower_text):
         actions.append(
             ProposedAction(
@@ -583,7 +612,7 @@ def _analyze_host_text_deterministic(
             )
         )
 
-    if contextual_sku and stock_match and not flash_match:
+    if contextual_sku and stock_match and not flash_match and not cn_flash_fields:
         actions.append(
             ProposedAction(
                 type="update_stock",
@@ -638,6 +667,19 @@ def _analyze_host_text_deterministic(
         source_text=text,
     )
     return decision, actions
+
+
+def _extract_cn_flash_fields(text: str) -> tuple[int, str, int] | None:
+    duration_match = CN_FLASH_DURATION_RE.search(text)
+    price_match = CN_FLASH_PRICE_RE.search(text)
+    limit_match = CN_FLASH_LIMIT_RE.search(text)
+    if not duration_match or not price_match or not limit_match:
+        return None
+    return (
+        int(duration_match.group(1)),
+        price_match.group(1),
+        int(limit_match.group(1)),
+    )
 
 
 def _has_promo_context(lower_text: str) -> bool:

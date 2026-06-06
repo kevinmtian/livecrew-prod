@@ -486,8 +486,8 @@ Examples:
 "First 10 orders for the serum are 19 dollars."
 -> Create a quantity-limited flash sale for GlowFix Vitamin C Serum.
 
-"设置Vitamin C促销，限时3min，限价10元，限量10个"
--> Use LLM intent extraction to create a flash sale for GlowFix Vitamin C Serum: three minutes, 10 units, $10.
+"设置 Vitamin C 促销，限时 3 分钟，限价 10 元，限量 50 个"
+-> Use LLM intent extraction to create a flash sale for GlowFix Vitamin C Serum: three minutes, 50 units, $10.
 
 "Cancel the flash deal."
 -> Cancel the active flash sale.
@@ -511,6 +511,32 @@ Acceptance criteria:
 - The viewer room displays flash-sale price, remaining stock, and a prominent countdown timer.
 - Orders reduce both SKU stock and flash-sale remaining stock when applicable.
 - Cancelled or expired promotions no longer affect order price.
+
+### FR-4A: Flash-Sale Atmosphere Voice Cue
+
+During an active flash sale, the host may ask atmosphere-building operational questions such as "How many orders are left?" or "现在还剩多少单？". LiveCrew should detect these host transcript moments and answer with a short AI-generated voice cue using current backend flash-sale inventory.
+
+Expected behavior:
+
+- The feature should use finalized host transcript text, not raw audio, as the trigger input.
+- The backend should only generate an atmosphere cue while a flash sale is active or in its sold-out closing moment.
+- Cue detection should understand English, Chinese, and mixed-language phrasing about remaining orders, remaining stock, sold count, countdown, or flash-sale urgency.
+- The remaining quantity must come from backend `flash_sale.remaining_stock`; the model must not invent stock, sales, discounts, gifts, delivery promises, or unverified claims.
+- The generated script should be short, energetic, and suitable for a live room assistant voice.
+- The host cockpit should play the generated voice cue and mix it into the viewer stream when browser audio mixing is available.
+- The original host microphone audio should remain the source for realtime transcription so the AI cue is not fed back into the CoHost transcript loop.
+- If OpenAI TTS is unavailable, the backend should still return the factual cue text and mark audio as unavailable so the host can read it manually.
+- Every generated cue should be recorded in the event ledger.
+- For local demo testing, submitting the default Vitamin C flash-sale text command may run a mock flow that records a 10-unit viewer order and triggers a simulated host remaining-stock question four seconds later.
+
+Acceptance criteria:
+
+- During an active flash sale, a transcript like "现在还剩多少单？" generates a cue using the exact backend remaining sale stock.
+- The local mock flow can reduce a 50-unit flash sale to 40 remaining units before the atmosphere cue is generated.
+- Non-atmosphere transcripts and transcripts outside a flash sale do not generate a cue.
+- The cue text and ledger payload include SKU id, remaining stock, and source transcript.
+- The browser does not receive the long-lived OpenAI API key.
+- Viewer stream audio can include the AI cue when the host stream is live and browser audio mixing is supported.
 
 ### FR-5: Answer Viewer Questions Autonomously
 

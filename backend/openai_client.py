@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import os
 import ssl
@@ -46,6 +47,52 @@ def transcribe_audio_file(path: Path) -> str:
             file=audio_file,
         )
     return transcript.text
+
+
+def generate_speech_base64(
+    text: str,
+    *,
+    instructions: str | None = None,
+) -> tuple[str, str]:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured.")
+
+    body = {
+        "model": os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+        "voice": os.getenv("OPENAI_TTS_VOICE", "marin"),
+        "input": text,
+        "response_format": "mp3",
+    }
+    if instructions:
+        body["instructions"] = instructions
+
+    request = Request(
+        "https://api.openai.com/v1/audio/speech",
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "OpenAI-Safety-Identifier": "livecrew-local-demo",
+        },
+    )
+
+    try:
+        with _openai_urlopen(request, timeout=20) as response:
+            audio_bytes = response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI TTS request failed: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI TTS request failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("OpenAI TTS request timed out.") from exc
+
+    if not audio_bytes:
+        raise RuntimeError("OpenAI TTS response did not include audio bytes.")
+
+    return base64.b64encode(audio_bytes).decode("ascii"), "audio/mpeg"
 
 
 def _transcription_prompt() -> str:

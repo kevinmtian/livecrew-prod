@@ -20,6 +20,7 @@ import {
   subscribeToLocalRoom,
 } from "@/lib/local-room";
 import {
+  type AtmosphereCue,
   type BackendState,
   type CoHostDebugMessage,
   type MonitorSignalPayload,
@@ -39,10 +40,12 @@ import {
   postIceCandidate,
   postMediaOffer,
   rejectPendingAction,
+  requestAtmosphereCue,
   resetBackendState,
   sendEditedPendingReply,
   sendHostCommand,
   sendHostTranscript,
+  sendViewerMessage,
   stopMediaSession,
 } from "@/lib/livecrew-api";
 import { type FormEvent, useEffect, useRef, useState } from "react";
@@ -139,6 +142,11 @@ const boundedScrollAreaClass =
   "max-h-96 space-y-3 overflow-y-scroll pr-2 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300";
 const ledgerScrollAreaClass =
   "min-h-72 max-h-96 space-y-3 overflow-y-auto pr-2 [scrollbar-gutter:stable] xl:min-h-0 xl:max-h-none xl:flex-1 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300";
+const defaultCohostTextCommand =
+  "设置 Vitamin C 促销，限时 3 分钟，限价 10 元，限量 50 个";
+const demoMockViewerName = "mock-buyer";
+const demoMockOrderText = "I want 10";
+const demoMockHostQuestion = "现在还有几单？";
 
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
@@ -907,9 +915,7 @@ function AgentFlowPanel({ flow }: { flow: AgentFlowModel }) {
 }
 
 export default function HostPage() {
-  const [commandInput, setCommandInput] = useState(
-    "Switch to the Bamboo Thermal Tumbler.",
-  );
+  const [commandInput, setCommandInput] = useState(defaultCohostTextCommand);
   const [activeSkuId, setActiveSkuId] = useState<SkuId>(defaultActiveSkuId);
   const [backendState, setBackendState] = useState<BackendState | null>(null);
   const [backendStatus, setBackendStatus] = useState<
@@ -962,9 +968,14 @@ export default function HostPage() {
   const [latestInsight, setLatestInsight] =
     useState<ViewerInsightSnapshot | null>(null);
   const [ignoredDraftIds, setIgnoredDraftIds] = useState<string[]>([]);
+  const [atmosphereCues, setAtmosphereCues] = useState<AtmosphereCue[]>([]);
+  const [atmosphereCueError, setAtmosphereCueError] = useState("");
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const broadcastStreamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const audioDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const viewerPeersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const transcriptionPeerRef = useRef<RTCPeerConnection | null>(null);
   const transcriptionDataChannelRef = useRef<RTCDataChannel | null>(null);
@@ -972,6 +983,8 @@ export default function HostPage() {
   const answerPollRef = useRef<number | null>(null);
   const viewerCandidateCountsRef = useRef<Map<string, number>>(new Map());
   const refreshViewerWordCloudRef = useRef<() => Promise<void>>(async () => {});
+  const clientEventSequenceRef = useRef(0);
+  const demoAtmosphereTimeoutRef = useRef<number | null>(null);
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
   const backendActiveSku = backendState?.skus.find(
@@ -1021,43 +1034,97 @@ export default function HostPage() {
     viewerCandidateCountsRef.current.clear();
   }
 
-  useEffect(() => {
-    function syncRoomState() {
-      const nextRoomState = readLocalRoomState();
-      setRoomState(nextRoomState);
+  function clearDemoAtmosphereTimer() {
+    if (demoAtmosphereTimeoutRef.current) {
+      window.clearTimeout(demoAtmosphereTimeoutRef.current);
+      demoAtmosphereTimeoutRef.current = null;
+    }
+  }
+
+  function nextClientEvent(prefix: string) {
+    clientEventSequenceRef.current += 1;
+    return {
+      id: `${prefix}-${clientEventSequenceRef.current}`,
+      timestamp: clientEventSequenceRef.current,
+    };
+  }
+
+  function prepareBroadcastStream(sourceStream: MediaStream) {
+    const audioTrack = sourceStream.getAudioTracks()[0];
+    if (!audioTrack || typeof AudioContext === "undefined") {
+      broadcastStreamRef.current = sourceStream;
+      return sourceStream;
     }
 
-    syncRoomState();
-    void syncBackendState();
-    void syncLiveMetrics();
-    const unsubscribe = subscribeToLocalRoom(syncRoomState);
-    const backendPollId = window.setInterval(() => {
-      void syncBackendState();
-    }, 3000);
-    const metricsPollId = window.setInterval(() => {
-      void syncLiveMetrics();
-    }, 3000);
-    const initialWordCloudId = window.setTimeout(() => {
-      void refreshViewerWordCloudRef.current();
-    }, 5000);
-    const wordCloudIntervalId = window.setInterval(() => {
-      void refreshViewerWordCloudRef.current();
-    }, 60000);
+    try {
+      const audioContext = new AudioContext();
+      const audioDestination = audioContext.createMediaStreamDestination();
+      const microphoneSource = audioContext.createMediaStreamSource(
+        new MediaStream([audioTrack]),
+      );
+      microphoneSource.connect(audioDestination);
 
-    return () => {
-      window.clearInterval(backendPollId);
-      window.clearInterval(metricsPollId);
-      window.clearTimeout(initialWordCloudId);
-      window.clearInterval(wordCloudIntervalId);
-      if (answerPollRef.current) {
-        window.clearInterval(answerPollRef.current);
-      }
-      unsubscribe();
-      stopRealtimeTranscription();
-      closeViewerPeers();
-      localStreamRef.current?.getTracks().forEach((track) => track.stop());
-    };
-  }, []);
+      audioContextRef.current = audioContext;
+      audioDestinationRef.current = audioDestination;
+      void audioContext.resume();
+
+      const broadcastStream = new MediaStream([
+        ...sourceStream.getVideoTracks(),
+        ...audioDestination.stream.getAudioTracks(),
+      ]);
+      broadcastStreamRef.current = broadcastStream;
+      return broadcastStream;
+    } catch {
+      broadcastStreamRef.current = sourceStream;
+      return sourceStream;
+    }
+  }
+
+  async function stopAudioMixer() {
+    if (broadcastStreamRef.current !== localStreamRef.current) {
+      broadcastStreamRef.current?.getAudioTracks().forEach((track) => track.stop());
+    }
+    broadcastStreamRef.current = null;
+    audioDestinationRef.current = null;
+    if (audioContextRef.current) {
+      await audioContextRef.current.close().catch(() => null);
+    }
+    audioContextRef.current = null;
+  }
+
+  function base64ToArrayBuffer(base64Audio: string) {
+    const binary = window.atob(base64Audio);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes.buffer;
+  }
+
+  async function playAtmosphereCueAudio(
+    audioBase64: string,
+    audioMimeType: string | null,
+  ) {
+    const audioContext = audioContextRef.current;
+    const audioDestination = audioDestinationRef.current;
+    if (!audioContext || !audioDestination) {
+      const audio = new Audio(
+        `data:${audioMimeType ?? "audio/mpeg"};base64,${audioBase64}`,
+      );
+      await audio.play();
+      return;
+    }
+
+    await audioContext.resume();
+    const audioBuffer = await audioContext.decodeAudioData(
+      base64ToArrayBuffer(audioBase64),
+    );
+    const cueSource = audioContext.createBufferSource();
+    cueSource.buffer = audioBuffer;
+    cueSource.connect(audioContext.destination);
+    cueSource.connect(audioDestination);
+    cueSource.start();
+  }
 
   async function syncBackendState() {
     try {
@@ -1065,6 +1132,7 @@ export default function HostPage() {
       setBackendState(state);
       setBackendStatus("online");
       setStockInput(getActiveStockInputValue(state));
+      setAtmosphereCues(state.atmosphere_cues.slice(0, 3));
       const nextSkuId = getValidSkuId(state.active_sku_id);
       setActiveSkuId(nextSkuId);
       if (readLocalRoomState().activeSkuId !== nextSkuId) {
@@ -1102,7 +1170,97 @@ export default function HostPage() {
       setWordCloudRefreshing(false);
     }
   }
-  refreshViewerWordCloudRef.current = refreshViewerWordCloud;
+
+  async function handleAtmosphereCue(text: string) {
+    try {
+      const response = await requestAtmosphereCue(text);
+      setBackendState(response.state);
+      setBackendStatus("online");
+      const cue = response.cue;
+      if (!cue) {
+        return;
+      }
+
+      setAtmosphereCues((currentCues) => [cue, ...currentCues].slice(0, 3));
+      setAtmosphereCueError("");
+      appendLedger({
+        id: `evt-atmosphere-cue-${cue.id}`,
+        label: "AI voice cue",
+        detail: cue.answer_text,
+        status: cue.audio_status === "generated" ? "complete" : "watching",
+      });
+
+      if (response.audio_base64) {
+        await playAtmosphereCueAudio(
+          response.audio_base64,
+          response.audio_mime_type,
+        );
+      }
+    } catch (error) {
+      setAtmosphereCueError(
+        error instanceof Error ? error.message : "Unable to generate voice cue.",
+      );
+    }
+  }
+
+  function responseCreatedFlashSale(response: WorkflowResponse) {
+    return response.applied_actions.some(
+      (action) => action.type === "create_flash_sale",
+    );
+  }
+
+  async function runMockAtmosphereDemoFlow(commandResponse: WorkflowResponse) {
+    if (!responseCreatedFlashSale(commandResponse)) {
+      return;
+    }
+
+    clearDemoAtmosphereTimer();
+    appendLedger({
+      id: "evt-demo-mock-order-start",
+      label: "Mock buyer order",
+      detail: "Demo fixture is recording a 10-unit viewer order before the AI cue.",
+      status: "watching",
+    });
+
+    try {
+      const orderResponse = await sendViewerMessage(
+        demoMockOrderText,
+        demoMockViewerName,
+      );
+      applyWorkflowResponse(orderResponse);
+      appendLedger({
+        id: "evt-demo-mock-order-complete",
+        label: "Mock order recorded",
+        detail: "Mock buyer ordered 10 units; remaining flash-sale stock should drop before the cue.",
+        status: "complete",
+      });
+    } catch (error) {
+      appendLedger({
+        id: "evt-demo-mock-order-error",
+        label: "Mock order failed",
+        detail:
+          error instanceof Error
+            ? error.message
+            : "Unable to record the mock viewer order.",
+        status: "blocked",
+      });
+      return;
+    }
+
+    demoAtmosphereTimeoutRef.current = window.setTimeout(() => {
+      appendLiveTranscriptLine(demoMockHostQuestion, "final");
+      const eventMarker = nextClientEvent("mock-host-question");
+      setHostInputTrace({
+        id: eventMarker.id,
+        timestamp: eventMarker.timestamp,
+        text: demoMockHostQuestion,
+        source: "speech_transcript",
+        matchedEntity: inferMatchedSkuName(demoMockHostQuestion, backendState),
+      });
+      void handleAtmosphereCue(demoMockHostQuestion);
+      demoAtmosphereTimeoutRef.current = null;
+    }, 4000);
+  }
 
   function appendLedger(event: LedgerEvent) {
     setLedgerEvents((currentEvents) => [
@@ -1157,9 +1315,10 @@ export default function HostPage() {
     }
 
     appendLiveTranscriptLine(trimmedText, "final");
+    const eventMarker = nextClientEvent("host-speech");
     setHostInputTrace({
-      id: `host-speech-${Date.now()}`,
-      timestamp: Date.now(),
+      id: eventMarker.id,
+      timestamp: eventMarker.timestamp,
       text: trimmedText,
       source: "speech_transcript",
       matchedEntity: inferMatchedSkuName(trimmedText, backendState),
@@ -1167,6 +1326,7 @@ export default function HostPage() {
     try {
       const response = await sendHostTranscript(trimmedText);
       applyWorkflowResponse(response);
+      void handleAtmosphereCue(trimmedText);
     } catch (error) {
       const detail =
         error instanceof Error
@@ -1449,9 +1609,10 @@ export default function HostPage() {
       return;
     }
 
+    const eventMarker = nextClientEvent("host-command");
     setHostInputTrace({
-      id: `host-command-${Date.now()}`,
-      timestamp: Date.now(),
+      id: eventMarker.id,
+      timestamp: eventMarker.timestamp,
       text,
       source: "typed_command",
       matchedEntity: inferMatchedSkuName(text, backendState),
@@ -1459,6 +1620,7 @@ export default function HostPage() {
     try {
       const response = await sendHostCommand(text);
       applyWorkflowResponse(response);
+      void runMockAtmosphereDemoFlow(response);
       setCommandInput("");
     } catch (error) {
       appendLedger({
@@ -1513,6 +1675,7 @@ export default function HostPage() {
   }
 
   async function handleResetDemo() {
+    clearDemoAtmosphereTimer();
     try {
       const state = await resetBackendState();
       setBackendState(state);
@@ -1523,13 +1686,15 @@ export default function HostPage() {
     }
     resetLocalRoomState();
     setRoomState(readLocalRoomState());
-    setCommandInput("Switch to the Bamboo Thermal Tumbler.");
+    setCommandInput(defaultCohostTextCommand);
     setLiveTranscriptLines([]);
     setInterimTranscript("");
     setLiveTranscriptError("");
     setHostInputTrace(null);
     setLatestInsight(null);
     setIgnoredDraftIds([]);
+    setAtmosphereCues([]);
+    setAtmosphereCueError("");
     setViewerMonitorError("");
     setLedgerEvents(initialLedger);
     setQueueItems([
@@ -1579,6 +1744,7 @@ export default function HostPage() {
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
+      const broadcastStream = prepareBroadcastStream(stream);
       void startRealtimeTranscription(stream);
 
       const session = await createMediaSession();
@@ -1608,7 +1774,9 @@ export default function HostPage() {
             });
             viewerPeersRef.current.set(viewerId, peer);
             viewerCandidateCountsRef.current.set(viewerId, 0);
-            stream.getTracks().forEach((track) => peer?.addTrack(track, stream));
+            broadcastStream
+              .getTracks()
+              .forEach((track) => peer?.addTrack(track, broadcastStream));
             peer.onicecandidate = (event) => {
               if (event.candidate) {
                 void postIceCandidate(
@@ -1662,6 +1830,7 @@ export default function HostPage() {
     }
     stopRealtimeTranscription();
     closeViewerPeers();
+    await stopAudioMixer();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     if (localVideoRef.current) {
@@ -1674,6 +1843,53 @@ export default function HostPage() {
     setStreamStatus("offline");
     setHostMediaSession(null, "offline");
   }
+
+  useEffect(() => {
+    refreshViewerWordCloudRef.current = refreshViewerWordCloud;
+  });
+
+  useEffect(() => {
+    function syncRoomState() {
+      const nextRoomState = readLocalRoomState();
+      setRoomState(nextRoomState);
+    }
+
+    const initialSyncId = window.setTimeout(() => {
+      syncRoomState();
+      void syncBackendState();
+      void syncLiveMetrics();
+    }, 0);
+    const unsubscribe = subscribeToLocalRoom(syncRoomState);
+    const backendPollId = window.setInterval(() => {
+      void syncBackendState();
+    }, 3000);
+    const metricsPollId = window.setInterval(() => {
+      void syncLiveMetrics();
+    }, 3000);
+    const initialWordCloudId = window.setTimeout(() => {
+      void refreshViewerWordCloudRef.current();
+    }, 5000);
+    const wordCloudIntervalId = window.setInterval(() => {
+      void refreshViewerWordCloudRef.current();
+    }, 60000);
+
+    return () => {
+      window.clearInterval(backendPollId);
+      window.clearInterval(metricsPollId);
+      window.clearTimeout(initialSyncId);
+      window.clearTimeout(initialWordCloudId);
+      window.clearInterval(wordCloudIntervalId);
+      if (answerPollRef.current) {
+        window.clearInterval(answerPollRef.current);
+      }
+      unsubscribe();
+      clearDemoAtmosphereTimer();
+      stopRealtimeTranscription();
+      closeViewerPeers();
+      void stopAudioMixer();
+      localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
 
   const liveTranscriptTone =
     liveTranscriptStatus === "listening"
@@ -1866,6 +2082,43 @@ export default function HostPage() {
               {liveTranscriptError ? (
                 <p className="border-t border-amber-100 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
                   {liveTranscriptError}
+                </p>
+              ) : null}
+            </div>
+            <div className="mt-3 rounded-md border border-emerald-100 bg-emerald-50/80 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-900">
+                  Flash-sale voice cue
+                </p>
+                <StatusPill tone={atmosphereCues.length ? "good" : "neutral"}>
+                  {atmosphereCues.length ? "armed" : "listening"}
+                </StatusPill>
+              </div>
+              {atmosphereCues.length ? (
+                <div className="mt-2 space-y-2">
+                  {atmosphereCues.map((cue) => (
+                    <div
+                      className="rounded-md border border-emerald-100 bg-white px-3 py-2 text-sm leading-6 text-slate-700"
+                      key={cue.id}
+                    >
+                      <div className="mb-1 flex flex-wrap items-center gap-2 text-xs font-semibold uppercase text-emerald-700">
+                        <span>{cue.audio_status}</span>
+                        {cue.remaining_stock !== null ? (
+                          <span>{cue.remaining_stock} left</span>
+                        ) : null}
+                      </div>
+                      <p>{cue.answer_text}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-sm leading-6 text-slate-600">
+                  Waiting for flash-sale cue.
+                </p>
+              )}
+              {atmosphereCueError ? (
+                <p className="mt-2 text-sm leading-6 text-amber-700">
+                  {atmosphereCueError}
                 </p>
               ) : null}
             </div>

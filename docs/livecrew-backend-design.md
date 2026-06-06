@@ -82,6 +82,7 @@ LangGraph orchestrator
 Agent nodes
   - CoHostAgent
   - ConciergeAgent
+  - AtmosphereCueAgent
   - ProducerAgent
         |
         v
@@ -126,6 +127,7 @@ Responsibilities:
 - Browser-native media capture provides the host camera/microphone stream to viewers.
 - Media signaling coordinates host and viewer sessions but does not persist or inspect raw audio/video.
 - OpenAI API calls for transcription, structured action extraction, grounded reply drafting, and report narrative generation are server-side backend responsibilities.
+- AtmosphereCueAgent may generate flash-sale voice cue text and TTS audio, but it is read-only and must not mutate commerce quantities or prices.
 - Next.js should call the Python backend instead of implementing agent or commerce logic in API routes.
 
 ### Document-Driven Backend Rule
@@ -160,6 +162,7 @@ backend/
   agents/
     cohost.py
     concierge.py
+    atmosphere.py
     producer.py
 
   graphs/
@@ -193,6 +196,7 @@ Module responsibilities:
 - `data/catalogue.py`: Seeded product catalogue.
 - `agents/cohost.py`: Host-facing operations agent for transcript understanding and proposed commerce actions.
 - `agents/concierge.py`: Viewer-facing service agent for product answers, safe replies, and order proposals.
+- `agents/atmosphere.py`: Read-only flash-sale atmosphere detector and factual cue writer for host transcript moments.
 - `agents/producer.py`: Read-only post-stream report agent.
 - `graphs/livecrew_graph.py`: LangGraph workflow.
 - `policies/*`: Deterministic validation policies shared by graph nodes and tests.
@@ -244,6 +248,7 @@ class CommerceState(BaseModel):
     viewer_sessions: list[ViewerSession]
     viewer_comments: list[ViewerComment]
     viewer_insights: list[ViewerInsightSnapshot]
+    atmosphere_cues: list[AtmosphereCue]
     orders: list[Order]
     announcements: list[Announcement]
     pending_actions: list[PendingAction]
@@ -258,6 +263,7 @@ Important rules:
 - Viewer sessions store active username-only logins for the current demo run.
 - Viewer comments are backend source of truth for ConciergeAgent replies and host word-cloud analysis.
 - Viewer insight snapshots summarize recent viewer demand for the host cockpit, including deterministic intent counts derived from stored viewer comments.
+- Atmosphere cue records store generated flash-sale assistant scripts, source transcript text, SKU id, remaining sale stock, and audio availability metadata. Raw TTS audio bytes should be returned in the route response but not stored in long-lived backend state.
 - Viewer insight generation filters out host, system, and LiveCrew Agent sender names before building terms, intent counts, OpenAI prompts, summaries, or source comment ids.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
@@ -288,7 +294,7 @@ Examples:
 "For the next five minutes, first 20 buyers get it at 18.8."
 -> create_flash_sale for active SKU
 
-"设置Vitamin C促销，限时3min，限价10元，限量10个"
+"设置 Vitamin C 促销，限时 3 分钟，限价 10 元，限量 50 个"
 -> set_active_sku for GlowFix Vitamin C Serum
 -> create_flash_sale for GlowFix Vitamin C Serum
 
@@ -297,6 +303,7 @@ Examples:
 ```
 
 Host transcript processing should support one proposed action or multiple proposed actions in a single utterance or in a multi-segment host thought.
+The deterministic fallback parser should recognize the demo Chinese mixed-language flash-sale fields `限时`, `限价`, and `限量` when OpenAI extraction is unavailable.
 CoHostAgent should use OpenAI structured output for primary host intent extraction and return proposed actions in utterance order. Deterministic parsing remains a fallback when OpenAI is unavailable, times out, or returns invalid structured output; fallback output still passes through the same guardrails and commerce service.
 
 CoHost conversation context:
@@ -652,6 +659,7 @@ GET  /events/stream
 POST /events/host-transcript
 POST /events/host-command
 POST /events/viewer-message
+POST /events/atmosphere-cue
 POST /events/realtime-transcription-token
 POST /viewer-insights/word-cloud
 GET  /debug/cohost-messages
@@ -691,6 +699,49 @@ Request:
   "text": "Switch to the tumbler, make it 22, and first 20 orders get 18.8 for five minutes."
 }
 ```
+
+### `POST /events/atmosphere-cue`
+
+The host cockpit calls this after a finalized host transcript is processed by CoHostAgent. The route is read-only with respect to commerce quantities and prices: it may append an atmosphere cue record and ledger entry, but it must not update SKU stock, flash-sale remaining stock, orders, or prices.
+
+Request:
+
+```json
+{
+  "text": "现在还剩多少单？"
+}
+```
+
+Response:
+
+```python
+class AtmosphereCue(BaseModel):
+    id: str
+    source_text: str
+    answer_text: str
+    sku_id: str | None
+    remaining_stock: int | None
+    stock_limit: int | None
+    seconds_left: int | None
+    confidence: float
+    reason: str
+    audio_status: Literal["generated", "unavailable"]
+    created_at: datetime
+
+class AtmosphereCueResponse(BaseModel):
+    cue: AtmosphereCue | None
+    audio_base64: str | None
+    audio_mime_type: str | None
+    state: CommerceState
+```
+
+Rules:
+
+- Generate a cue only when a flash sale exists and the host transcript asks an atmosphere question about remaining sale stock, orders, countdown, sold count, or urgency.
+- Remaining quantity must be copied from `CommerceState.flash_sale.remaining_stock`.
+- The model may classify intent and polish wording, but the final answer text must include backend facts and must not invent discounts, gifts, shipping, medical claims, or external prices.
+- If TTS fails, return the cue text with `audio_status="unavailable"` and `audio_base64=null`.
+- Append ledger event `atmosphere_cue_generated` only when a cue is generated.
 
 ### `POST /events/realtime-transcription-token`
 

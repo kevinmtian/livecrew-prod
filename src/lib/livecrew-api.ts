@@ -57,6 +57,7 @@ export type BackendState = {
   viewer_sessions: ViewerSession[];
   viewer_comments: ViewerComment[];
   viewer_insights: ViewerInsightSnapshot[];
+  atmosphere_cues: AtmosphereCue[];
   orders: Array<{
     id: string;
     sku_id: string;
@@ -112,6 +113,27 @@ export type ViewerInsightSnapshot = {
   suggested_replies: string[];
   source_comment_ids: string[];
   created_at: string;
+};
+
+export type AtmosphereCue = {
+  id: string;
+  source_text: string;
+  answer_text: string;
+  sku_id: string | null;
+  remaining_stock: number | null;
+  stock_limit: number | null;
+  seconds_left: number | null;
+  confidence: number;
+  reason: string;
+  audio_status: "generated" | "unavailable";
+  created_at: string;
+};
+
+export type AtmosphereCueResponse = {
+  cue: AtmosphereCue | null;
+  audio_base64: string | null;
+  audio_mime_type: string | null;
+  state: BackendState;
 };
 
 export type ViewerSession = {
@@ -267,6 +289,13 @@ export function sendViewerMessage(text: string, viewer = "viewer") {
   return requestJson<WorkflowResponse>("/events/viewer-message", {
     method: "POST",
     body: JSON.stringify({ text, viewer }),
+  });
+}
+
+export function requestAtmosphereCue(text: string) {
+  return requestJson<AtmosphereCueResponse>("/events/atmosphere-cue", {
+    method: "POST",
+    body: JSON.stringify({ text }),
   });
 }
 

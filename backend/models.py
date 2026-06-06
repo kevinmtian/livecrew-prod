@@ -156,6 +156,20 @@ class ViewerInsightSnapshot(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class AtmosphereCue(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("atmo"))
+    source_text: str
+    answer_text: str
+    sku_id: str | None = None
+    remaining_stock: int | None = None
+    stock_limit: int | None = None
+    seconds_left: int | None = None
+    confidence: float = Field(ge=0, le=1)
+    reason: str
+    audio_status: Literal["generated", "unavailable"] = "unavailable"
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class PendingAction(BaseModel):
     id: str = Field(default_factory=lambda: create_id("pending"))
     action: ProposedAction
@@ -172,6 +186,7 @@ class CommerceState(BaseModel):
     viewer_sessions: list[ViewerSession] = Field(default_factory=list)
     viewer_comments: list[ViewerComment] = Field(default_factory=list)
     viewer_insights: list[ViewerInsightSnapshot] = Field(default_factory=list)
+    atmosphere_cues: list[AtmosphereCue] = Field(default_factory=list)
     orders: list[Order] = Field(default_factory=list)
     pending_actions: list[PendingAction] = Field(default_factory=list)
     ledger: list[LedgerEntry] = Field(default_factory=list)
@@ -214,6 +229,17 @@ class PendingReplyRequest(BaseModel):
 
 class ViewerInsightRequest(BaseModel):
     window_seconds: int = Field(default=180, ge=30, le=900)
+
+
+class AtmosphereCueRequest(BaseModel):
+    text: str
+
+
+class AtmosphereCueResponse(BaseModel):
+    cue: AtmosphereCue | None = None
+    audio_base64: str | None = None
+    audio_mime_type: str | None = None
+    state: CommerceState
 
 
 class CoHostDebugMessage(BaseModel):

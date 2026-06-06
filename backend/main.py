@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from backend.agents.cohost import get_cohost_debug_messages, reset_cohost_context
+from backend.agents.atmosphere import generate_atmosphere_cue
 from backend.agents.monitor import analyze_monitor_signals
 from backend.agents.viewer_insights import generate_viewer_word_cloud
 from backend.commerce import apply_action, approve_pending_action, reject_pending_action
@@ -18,6 +19,8 @@ from backend.media_signaling import media_store
 from backend.models import (
     AgentDecision,
     AppliedAction,
+    AtmosphereCueRequest,
+    AtmosphereCueResponse,
     LedgerEntry,
     PendingReplyRequest,
     RealtimeTranscriptionOfferRequest,
@@ -206,6 +209,43 @@ def host_transcript(request: TextEventRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Transcript text is required.")
     return run_cohost_workflow(request.text.strip(), "speech_transcript")
+
+
+@app.post("/events/atmosphere-cue", response_model=AtmosphereCueResponse)
+def atmosphere_cue(request: AtmosphereCueRequest):
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Transcript text is required.")
+
+    state = commerce_store.get()
+    cue, audio_base64, audio_mime_type = generate_atmosphere_cue(text, state)
+    if cue is None:
+        return AtmosphereCueResponse(cue=None, state=state)
+
+    state.atmosphere_cues = [cue, *state.atmosphere_cues][:20]
+    state.ledger = [
+        LedgerEntry(
+            type="atmosphere_cue_generated",
+            detail=cue.answer_text,
+            source_text=text,
+            payload={
+                "cue_id": cue.id,
+                "sku_id": cue.sku_id,
+                "remaining_stock": cue.remaining_stock,
+                "stock_limit": cue.stock_limit,
+                "seconds_left": cue.seconds_left,
+                "audio_status": cue.audio_status,
+            },
+        ),
+        *state.ledger,
+    ][:200]
+    updated_state = commerce_store.replace(state)
+    return AtmosphereCueResponse(
+        cue=cue,
+        audio_base64=audio_base64,
+        audio_mime_type=audio_mime_type,
+        state=updated_state,
+    )
 
 
 @app.post("/events/viewer-message")
