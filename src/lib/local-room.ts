@@ -12,10 +12,21 @@ export type RoomMessage = {
   createdAt: number;
 };
 
+export type LocalMonitorSignal = {
+  scenarioLabel: string;
+  scenarioReason: string;
+  urgency: "low" | "medium" | "high";
+  hookLabel: string;
+  script: string;
+  signals: Record<string, string>;
+  createdAt: number;
+};
+
 export type LocalRoomState = {
   activeSkuId: SkuId;
   viewerMessages: RoomMessage[];
   replies: RoomMessage[];
+  monitorSignal: LocalMonitorSignal | null;
   mediaSessionId: string | null;
   hostStreamStatus: "offline" | "starting" | "live";
   updatedAt: number;
@@ -29,6 +40,7 @@ export const defaultLocalRoomState: LocalRoomState = {
   activeSkuId: defaultActiveSkuId,
   viewerMessages: [],
   replies: [],
+  monitorSignal: null,
   mediaSessionId: null,
   hostStreamStatus: "offline",
   updatedAt: 0,
@@ -70,6 +82,29 @@ function normalizeMessages(value: unknown): RoomMessage[] {
     .slice(-MAX_MESSAGES);
 }
 
+function normalizeMonitorSignal(value: unknown): LocalMonitorSignal | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as LocalMonitorSignal;
+  if (
+    typeof candidate.scenarioLabel !== "string" ||
+    typeof candidate.scenarioReason !== "string" ||
+    typeof candidate.hookLabel !== "string" ||
+    typeof candidate.script !== "string" ||
+    typeof candidate.createdAt !== "number" ||
+    !candidate.signals ||
+    typeof candidate.signals !== "object" ||
+    Array.isArray(candidate.signals) ||
+    !["low", "medium", "high"].includes(candidate.urgency)
+  ) {
+    return null;
+  }
+
+  return candidate;
+}
+
 export function readLocalRoomState(): LocalRoomState {
   if (!canUseBrowserStorage()) {
     return defaultLocalRoomState;
@@ -89,6 +124,7 @@ export function readLocalRoomState(): LocalRoomState {
       activeSkuId: activeSku?.id ?? defaultActiveSkuId,
       viewerMessages: normalizeMessages(parsedState.viewerMessages),
       replies: normalizeMessages(parsedState.replies),
+      monitorSignal: normalizeMonitorSignal(parsedState.monitorSignal),
       mediaSessionId:
         typeof parsedState.mediaSessionId === "string"
           ? parsedState.mediaSessionId
@@ -190,6 +226,23 @@ export function appendHostReply(text: string) {
   return reply;
 }
 
+export function appendAgentReply(text: string) {
+  const reply: RoomMessage = {
+    id: createId("agent-reply"),
+    sender: "agent",
+    name: "LiveCrew Agent",
+    text,
+    createdAt: Date.now(),
+  };
+
+  writeLocalRoomState((currentState) => ({
+    ...currentState,
+    replies: [...currentState.replies, reply].slice(-MAX_MESSAGES),
+  }));
+
+  return reply;
+}
+
 export function setHostMediaSession(
   mediaSessionId: string | null,
   hostStreamStatus: LocalRoomState["hostStreamStatus"],
@@ -198,6 +251,16 @@ export function setHostMediaSession(
     ...currentState,
     mediaSessionId,
     hostStreamStatus,
+  }));
+}
+
+export function setMonitorSignal(signal: Omit<LocalMonitorSignal, "createdAt">) {
+  writeLocalRoomState((currentState) => ({
+    ...currentState,
+    monitorSignal: {
+      ...signal,
+      createdAt: Date.now(),
+    },
   }));
 }
 

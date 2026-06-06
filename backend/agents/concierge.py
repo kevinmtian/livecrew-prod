@@ -8,111 +8,80 @@ from pydantic import BaseModel, Field, ValidationError
 
 from backend.models import AgentDecision, CommerceState, ProposedAction
 from backend.openai_client import get_openai_client
+from backend.tools.quantity_extractor import extract_order_quantity, has_order_intent
 from backend.tools.sku_resolver import get_sku_by_id, resolve_sku_from_text
 
 
-class ExtractedViewerReply(BaseModel):
-    intent: Literal[
-        "product_fact",
-        "price_stock",
-        "promo_request",
-        "order_interest",
-        "safety_claim",
-        "ambiguous",
-        "off_topic",
-    ]
+ViewerIntent = Literal[
+    "product_facts",
+    "promo_request",
+    "order",
+    "skin_safety",
+    "comparison",
+    "product_clarification",
+    "ambiguous",
+    "malicious",
+    "off_topic",
+]
+
+
+class ExtractedViewerMessage(BaseModel):
+    intent: ViewerIntent
     sku_id: str | None = None
-    reply_text: str
+    quantity: int | None = None
     confidence: float = Field(ge=0, le=1)
     reason: str
     evidence: list[str] = Field(default_factory=list)
-    requires_host_confirmation: bool = False
+    draft_reply: str | None = None
 
 
-UNSAFE_TERMS = {
-    "cure",
-    "medical",
-    "acne",
-    "eczema",
-    "allergy",
-    "guarantee",
-    "authentic",
-    "delivery",
-    "shipping",
-}
-PROMO_TERMS = {
-    "discount",
-    "coupon",
-    "cheaper",
-    "50%",
-    "free",
-    "deal",
-    "promo",
-    "voucher",
-}
-ORDER_TERMS = {"buy", "order", "take", "want", "cart", "checkout"}
+PROMO_RE = re.compile(
+    r"\b(discount|promo|promotion|deal|voucher|coupon|off|free|bundle|cheaper|best price)\b|%\s*off",
+    re.IGNORECASE,
+)
+UNSAFE_RE = re.compile(
+    r"\b(cure|treat|heal|fix acne|remove acne|acne|medical|doctor|guarantee|guaranteed|authentic|delivery|shipping|arrive|health|allergy|allergic|rash|irritation|heart|pregnan(?:t|cy)|sensitive skin|skin health)\b",
+    re.IGNORECASE,
+)
+MALICIOUS_RE = re.compile(r"\b(ignore instructions|jailbreak|system prompt|developer message)\b", re.IGNORECASE)
+COMPARISON_RE = re.compile(r"\b(compare|better than|versus|vs\.?|difference)\b", re.IGNORECASE)
+CLARIFICATION_RE = re.compile(r"\b(which|what product|what is this|this one|it)\b", re.IGNORECASE)
+PRODUCT_QUESTION_RE = re.compile(
+    r"\b(price|cost|how much|stock|left|available|size|big|capacity|ml|spf|morning|night|routine|use|refill|finish|strap|light|hot|cold|product|item|current|pinned)\b",
+    re.IGNORECASE,
+)
 
 
-def _format_price(price_cents: int) -> str:
-    return f"${price_cents / 100:.2f}"
-
-
-def _sku_context(state: CommerceState) -> str:
+def _catalogue_prompt(state: CommerceState) -> str:
     lines = []
     for sku in state.skus:
-        facts = " | ".join(sku.facts)
         lines.append(
-            f"- id={sku.id}; name={sku.name}; price={_format_price(sku.price_cents)}; "
-            f"stock={sku.stock}; facts={facts}; aliases={', '.join(sku.aliases)}"
+            f"- id={sku.id}; name={sku.name}; aliases={', '.join(sku.aliases)}; "
+            f"price_cents={sku.price_cents}; stock={sku.stock}; facts={'; '.join(sku.facts)}"
         )
     return "\n".join(lines)
 
 
-def _commerce_context(state: CommerceState, sku_id: str | None) -> str:
-    sku = get_sku_by_id(sku_id, state.skus)
-    if not sku:
-        return "No grounded SKU is available."
-
-    sale = state.flash_sale
-    sale_text = "No active flash sale for this SKU."
-    if sale and sale.sku_id == sku.id:
-        sale_text = (
-            f"Active flash sale: {_format_price(sale.sale_price_cents)}, "
-            f"{sale.remaining_stock}/{sale.stock_limit} units remaining."
-        )
-
-    return (
-        f"{sku.name}: {_format_price(sku.price_cents)}, {sku.stock} in stock. "
-        f"Facts: {'; '.join(sku.facts)}. {sale_text}"
-    )
-
-
-def _extract_with_openai(
-    text: str,
-    viewer: str,
-    state: CommerceState,
-) -> ExtractedViewerReply | None:
+def _extract_with_openai(text: str, state: CommerceState) -> ExtractedViewerMessage | None:
     client = get_openai_client()
     if client is None:
         return None
 
     model = os.getenv("OPENAI_CONCIERGE_MODEL", "gpt-4o-mini")
     active_sku = get_sku_by_id(state.active_sku_id, state.skus)
+    flash_sale = state.flash_sale.model_dump(mode="json") if state.flash_sale else None
     system_prompt = (
-        "You are LiveCrew's ConciergeAgent for livestream commerce. Draft one "
-        "short host-ready reply to a viewer message. Resolve explicit product "
-        "mentions first, then use the active SKU for contextual phrasing like "
-        "'this one'. Use only the provided catalogue facts, current price, stock, "
-        "and flash-sale state. Do not invent discounts, delivery promises, "
-        "authenticity claims, medical guarantees, or unsupported product claims. "
-        "For unsupported discount or safety claims, politely say what is confirmed "
-        "and that the host can confirm anything beyond that."
+        "You are LiveCrew's ConciergeAgent. Classify a viewer livestream commerce "
+        "message into one intent and draft only safe, grounded service language. "
+        "Use only SKU ids from the catalogue. Do not invent discounts, delivery "
+        "promises, authenticity claims, medical guarantees, or unsupported product claims. "
+        "If the viewer asks for unsupported or risky claims, classify the risk and say "
+        "that host confirmation is needed or that only current verified terms can be used."
     )
     user_prompt = (
-        f"Viewer: {viewer}\n"
-        f"Active SKU: {active_sku.name if active_sku else 'none'} "
-        f"({state.active_sku_id or 'none'})\n"
-        f"Catalogue and commerce state:\n{_sku_context(state)}\n\n"
+        f"Active SKU: {active_sku.name if active_sku else 'none'} ({state.active_sku_id or 'none'})\n"
+        f"Flash sale: {flash_sale}\n"
+        f"Catalogue:\n{_catalogue_prompt(state)}\n\n"
         f"Viewer message:\n{text}"
     )
 
@@ -124,7 +93,7 @@ def _extract_with_openai(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            response_format=ExtractedViewerReply,
+            response_format=ExtractedViewerMessage,
         )
     except Exception:
         return None
@@ -132,166 +101,431 @@ def _extract_with_openai(
     return completion.choices[0].message.parsed
 
 
-def _safe_discount_reply(state: CommerceState, sku_id: str | None) -> str:
+def _current_price_text(sku_id: str, state: CommerceState) -> str:
     sku = get_sku_by_id(sku_id, state.skus)
     if not sku:
-        return "I can check with the host on promotions; I do not want to promise an unconfirmed discount."
+        return "the current backend price"
 
-    sale = state.flash_sale
-    if sale and sale.sku_id == sku.id:
+    if state.flash_sale and state.flash_sale.sku_id == sku_id and state.flash_sale.remaining_stock > 0:
         return (
-            f"The confirmed flash sale for {sku.name} is {_format_price(sale.sale_price_cents)} "
-            f"while the sale stock lasts. I cannot promise any extra unconfirmed discount."
+            f"${state.flash_sale.sale_price_cents / 100:.2f} during the active flash sale "
+            f"while {state.flash_sale.remaining_stock} sale units remain; regular live price "
+            f"is ${sku.price_cents / 100:.2f}"
+        )
+
+    return f"${sku.price_cents / 100:.2f}"
+
+
+STOPWORDS = {
+    "the",
+    "and",
+    "for",
+    "this",
+    "that",
+    "with",
+    "what",
+    "which",
+    "product",
+    "item",
+    "does",
+    "have",
+    "good",
+}
+
+
+def _grounded_product_reply(text: str, sku_id: str, state: CommerceState) -> tuple[str, list[str]]:
+    sku = get_sku_by_id(sku_id, state.skus)
+    if not sku:
+        return (
+            "I need the host to confirm which product you mean before I answer.",
+            [],
+        )
+
+    lower_text = text.lower()
+    evidence = [sku.name]
+    reply_parts: list[str] = []
+
+    if any(term in lower_text for term in {"price", "cost", "how much"}):
+        reply_parts.append(f"{sku.name} is currently {_current_price_text(sku.id, state)}.")
+        evidence.append(f"price={sku.price_cents}")
+
+    if any(term in lower_text for term in {"stock", "left", "available"}):
+        reply_parts.append(f"There are {sku.stock} left in backend stock.")
+        evidence.append(f"stock={sku.stock}")
+
+    query_tokens = [
+        token
+        for token in re.findall(r"[a-z0-9]+", lower_text)
+        if len(token) > 2 and token not in STOPWORDS
+    ]
+    matched_facts = [
+        fact
+        for fact in sku.facts
+        if any(token in fact.lower() for token in query_tokens)
+    ]
+    if matched_facts:
+        reply_parts.append(f"Verified product facts: {_join_facts(matched_facts)}.")
+        evidence.extend(matched_facts)
+
+    asks_general_product = bool(PRODUCT_QUESTION_RE.search(text)) or bool(
+        re.search(r"\b(what product|what is this|which product)\b", text, re.IGNORECASE)
+    )
+    if not reply_parts and asks_general_product:
+        facts = sku.facts[:3]
+        reply_parts.append(
+            f"{sku.name} is {_join_facts(facts)}. Current price is "
+            f"{_current_price_text(sku.id, state)}, with {sku.stock} left."
+        )
+        evidence.extend([*facts, f"stock={sku.stock}", f"price={sku.price_cents}"])
+
+    if not reply_parts:
+        return (
+            f"I cannot verify that detail for {sku.name} from the current product facts.",
+            [sku.name, "unverified product detail"],
+        )
+
+    return " ".join(reply_parts), evidence
+
+
+def _join_facts(facts: list[str]) -> str:
+    if not facts:
+        return "listed in the current catalogue"
+    if len(facts) == 1:
+        return facts[0]
+    return f"{', '.join(facts[:-1])}, and {facts[-1]}"
+
+
+def _promo_reply(sku_id: str | None, state: CommerceState) -> tuple[str, list[str]]:
+    if sku_id:
+        sku = get_sku_by_id(sku_id, state.skus)
+    else:
+        sku = get_sku_by_id(state.active_sku_id, state.skus)
+
+    if sku and state.flash_sale and state.flash_sale.sku_id == sku.id and state.flash_sale.remaining_stock > 0:
+        reply = (
+            f"The verified deal for {sku.name} is ${state.flash_sale.sale_price_cents / 100:.2f} "
+            f"for the active flash sale, with {state.flash_sale.remaining_stock} sale units left. "
+            "I cannot add any unannounced discount."
+        )
+        return reply, [sku.name, "active flash sale", f"remaining={state.flash_sale.remaining_stock}"]
+
+    if sku:
+        reply = (
+            f"I can confirm {sku.name} is currently {_current_price_text(sku.id, state)}. "
+            "There is no verified extra discount in the backend state right now."
+        )
+        return reply, [sku.name, "no active verified promotion"]
+
+    return (
+        "I do not have a verified promotion for that request. The host should confirm any discount before it is offered.",
+        ["unsupported promotion request"],
+    )
+
+
+def _safe_risk_reply(text: str, sku_id: str | None, state: CommerceState) -> tuple[str, list[str]]:
+    sku = get_sku_by_id(sku_id, state.skus) if sku_id else get_sku_by_id(state.active_sku_id, state.skus)
+    if re.search(
+        r"\b(acne|cure|treat|heal|medical|health|allergy|allergic|rash|irritation|heart|pregnan(?:t|cy)|sensitive skin|skin health)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        name = sku.name if sku else "this product"
+        return (
+            f"I cannot verify health, allergy, or medical suitability for {name}. I can only share listed product facts, "
+            "and the host should decide whether to respond.",
+            ["health or medical claim escalated"],
         )
 
     return (
-        f"{sku.name} is currently {_format_price(sku.price_cents)} with {sku.stock} in stock. "
-        "I cannot promise an unconfirmed discount, but the host can confirm any live promo."
+        "I need the host to confirm that claim before sharing it with viewers.",
+        ["unsupported claim escalated"],
     )
 
 
-def _deterministic_reply(
+def _resolve_context_sku(text: str, state: CommerceState, extracted_sku_id: str | None) -> tuple[str | None, list[str]]:
+    explicit_sku = resolve_sku_from_text(text, state.skus)
+    if explicit_sku:
+        return explicit_sku.id, [explicit_sku.name]
+
+    if state.active_sku_id:
+        active_sku = get_sku_by_id(state.active_sku_id, state.skus)
+        if active_sku:
+            return active_sku.id, [active_sku.name, "active SKU context"]
+
+    if extracted_sku_id and get_sku_by_id(extracted_sku_id, state.skus):
+        return extracted_sku_id, [extracted_sku_id]
+
+    return None, []
+
+
+def _classify_deterministic(text: str, state: CommerceState) -> ExtractedViewerMessage:
+    if MALICIOUS_RE.search(text):
+        intent: ViewerIntent = "malicious"
+        confidence = 0.92
+        reason = "Viewer message attempted to manipulate system instructions."
+    elif UNSAFE_RE.search(text):
+        intent = "skin_safety"
+        confidence = 0.86
+        reason = "Viewer asked for an unsafe or unsupported claim."
+    elif PROMO_RE.search(text):
+        intent = "promo_request"
+        confidence = 0.84
+        reason = "Viewer asked about discount or promotion terms."
+    elif has_order_intent(text):
+        intent = "order"
+        confidence = 0.86
+        reason = "Viewer used clear order language."
+    elif COMPARISON_RE.search(text):
+        intent = "comparison"
+        confidence = 0.78
+        reason = "Viewer asked for a product comparison."
+    elif CLARIFICATION_RE.search(text):
+        intent = "product_clarification"
+        confidence = 0.72
+        reason = "Viewer used contextual product language."
+    elif len(text.strip()) < 4:
+        intent = "ambiguous"
+        confidence = 0.45
+        reason = "Viewer message was too short to classify."
+    elif PRODUCT_QUESTION_RE.search(text) or resolve_sku_from_text(text, state.skus):
+        intent = "product_facts"
+        confidence = 0.74
+        reason = "Viewer asked a routine product question."
+    else:
+        intent = "off_topic"
+        confidence = 0.72
+        reason = "Viewer message is not related to the live commerce catalogue."
+
+    return ExtractedViewerMessage(
+        intent=intent,
+        quantity=extract_order_quantity(text),
+        confidence=confidence,
+        reason=reason,
+        evidence=[text],
+    )
+
+
+def _has_commerce_relevance(text: str, state: CommerceState) -> bool:
+    return any(
+        (
+            bool(resolve_sku_from_text(text, state.skus)),
+            bool(PRODUCT_QUESTION_RE.search(text)),
+            bool(PROMO_RE.search(text)),
+            bool(UNSAFE_RE.search(text)),
+            bool(COMPARISON_RE.search(text)),
+            bool(CLARIFICATION_RE.search(text)),
+            has_order_intent(text),
+        )
+    )
+
+
+def _build_actions(
     text: str,
+    viewer: str,
     state: CommerceState,
-) -> ExtractedViewerReply:
-    normalized = text.lower()
-    mentioned_sku = resolve_sku_from_text(text, state.skus)
-    sku = mentioned_sku or get_sku_by_id(state.active_sku_id, state.skus)
-    sku_id = sku.id if sku else None
+    extracted: ExtractedViewerMessage,
+) -> list[ProposedAction]:
+    sku_id, sku_evidence = _resolve_context_sku(text, state, extracted.sku_id)
+    evidence = [*sku_evidence, *extracted.evidence]
+    actions: list[ProposedAction] = []
 
-    has_promo_request = any(term in normalized for term in PROMO_TERMS)
-    has_unsafe_request = any(term in normalized for term in UNSAFE_TERMS)
-    has_order_interest = any(
-        re.search(rf"\b{re.escape(term)}\b", normalized) for term in ORDER_TERMS
-    )
+    if extracted.intent == "malicious":
+        return []
 
-    if has_promo_request:
-        return ExtractedViewerReply(
-            intent="promo_request",
-            sku_id=sku_id,
-            reply_text=_safe_discount_reply(state, sku_id),
-            confidence=0.86,
-            reason="Viewer asked about a promotion or discount.",
-            evidence=["current price", "confirmed promotion state"],
+    if extracted.intent in {"ambiguous", "off_topic"}:
+        return []
+
+    if extracted.intent in {"skin_safety", "promo_request"}:
+        reply, reply_evidence = (
+            _promo_reply(sku_id, state)
+            if extracted.intent == "promo_request"
+            else _safe_risk_reply(text, sku_id, state)
         )
-
-    if has_unsafe_request:
-        reply = (
-            "I can share the listed product facts, but I cannot make medical, "
-            "delivery, or authenticity guarantees in chat. The host can confirm "
-            "anything beyond the product card."
-        )
-        if sku:
-            reply = (
-                f"For {sku.name}, the confirmed facts are: {'; '.join(sku.facts[:2])}. "
-                "I cannot make medical, delivery, or authenticity guarantees in chat."
+        actions.append(
+            ProposedAction(
+                type="suggest_reply",
+                sku_id=sku_id,
+                source_text=text,
+                input_source="viewer_message",
+                reply_text=reply,
+                viewer=viewer,
+                confidence=0.88,
+                reason=(
+                    "Discount and promotion request needs host approval."
+                    if extracted.intent == "promo_request"
+                    else "Health, allergy, or safety request needs host approval."
+                ),
+                evidence=[*evidence, *reply_evidence],
+                requires_host_confirmation=True,
             )
-        return ExtractedViewerReply(
-            intent="safety_claim",
-            sku_id=sku_id,
-            reply_text=reply,
-            confidence=0.8,
-            reason="Viewer asked for a claim that needs safe wording.",
-            evidence=sku.facts[:2] if sku else [],
-            requires_host_confirmation=False,
         )
+        return actions
 
-    if has_order_interest:
+    if extracted.intent == "order":
+        quantity = extracted.quantity or extract_order_quantity(text)
+        if sku_id and quantity:
+            sku = get_sku_by_id(sku_id, state.skus)
+            if sku and quantity > sku.stock:
+                actions.append(
+                    ProposedAction(
+                        type="request_host_confirmation",
+                        sku_id=sku_id,
+                        source_text=text,
+                        input_source="viewer_message",
+                        reply_text=(
+                            f"{viewer} asked for {quantity} x {sku.name}, but only "
+                            f"{sku.stock} are currently in backend stock."
+                        ),
+                        viewer=viewer,
+                        confidence=0.78,
+                        reason="Order quantity exceeds current backend stock.",
+                        evidence=[*evidence, f"quantity={quantity}", f"stock={sku.stock}"],
+                        requires_host_confirmation=True,
+                    )
+                )
+                return actions
+
+            actions.append(
+                ProposedAction(
+                    type="create_order",
+                    sku_id=sku_id,
+                    quantity=quantity,
+                    source_text=text,
+                    input_source="viewer_message",
+                    viewer=viewer,
+                    confidence=0.9,
+                    reason="Viewer used clear order intent with a grounded SKU.",
+                    evidence=[*evidence, f"quantity={quantity}"],
+                )
+            )
+            if sku:
+                if PROMO_RE.search(text) or UNSAFE_RE.search(text):
+                    reply, reply_evidence = (
+                        _promo_reply(sku_id, state)
+                        if PROMO_RE.search(text)
+                        else _safe_risk_reply(text, sku_id, state)
+                    )
+                    reply = (
+                        f"I recorded {quantity} x {sku.name}. {reply}"
+                    )
+                    actions.append(
+                        ProposedAction(
+                            type="suggest_reply",
+                            sku_id=sku_id,
+                            source_text=text,
+                            input_source="viewer_message",
+                            reply_text=reply,
+                            viewer=viewer,
+                            confidence=0.86,
+                            reason="Mixed order and risky viewer request needs host approval.",
+                            evidence=[sku.name, f"quantity={quantity}", *reply_evidence],
+                            requires_host_confirmation=True,
+                        )
+                    )
+                    return actions
+
+                actions.append(
+                    ProposedAction(
+                        type="suggest_reply",
+                        sku_id=sku_id,
+                        source_text=text,
+                        input_source="viewer_message",
+                        reply_text=(
+                            f"Noted {quantity} x {sku.name} for {viewer} at the backend price "
+                            f"that applies when the order is recorded."
+                        ),
+                        viewer=viewer,
+                        confidence=0.86,
+                        reason="Confirm the recorded order without inventing payment or delivery details.",
+                        evidence=[sku.name, f"quantity={quantity}"],
+                    )
+                )
+            return actions
+
+        actions.append(
+            ProposedAction(
+                type="request_host_confirmation",
+                sku_id=sku_id,
+                source_text=text,
+                input_source="viewer_message",
+                reply_text="Order intent needs a grounded SKU and quantity before it can be recorded.",
+                viewer=viewer,
+                confidence=0.62,
+                reason="Order was ambiguous.",
+                evidence=evidence,
+                requires_host_confirmation=True,
+            )
+        )
+        return actions
+
+    if extracted.intent == "comparison":
+        sku = get_sku_by_id(sku_id, state.skus) if sku_id else None
+        if not sku:
+            return []
         reply = (
-            f"Got it. {sku.name} is {_format_price(sku.price_cents)} and {sku.stock} are in stock. "
-            "The host can confirm the order details live."
-            if sku
-            else "Got it. The host can confirm which product and quantity you want."
+            f"I can compare only listed catalogue facts. For {sku.name}, the grounded facts are: "
+            f"{'; '.join(sku.facts)}."
         )
-        return ExtractedViewerReply(
-            intent="order_interest",
+        actions.append(
+            ProposedAction(
+                type="suggest_reply",
+                sku_id=sku_id,
+                source_text=text,
+                input_source="viewer_message",
+                reply_text=reply,
+                viewer=viewer,
+                confidence=0.76,
+                reason="Handle comparison request without inventing superiority claims.",
+                evidence=evidence + (sku.facts if sku else []),
+            )
+        )
+        return actions
+
+    if not sku_id:
+        return []
+
+    reply, reply_evidence = _grounded_product_reply(text, sku_id, state)
+    actions.append(
+        ProposedAction(
+            type="suggest_reply",
             sku_id=sku_id,
-            reply_text=reply,
-            confidence=0.78,
-            reason="Viewer appears interested in ordering.",
-            evidence=[sku.name] if sku else [],
-            requires_host_confirmation=True,
-        )
-
-    if sku:
-        return ExtractedViewerReply(
-            intent="product_fact",
-            sku_id=sku.id,
-            reply_text=(
-                f"{sku.name} is {_format_price(sku.price_cents)} with {sku.stock} in stock. "
-                f"Confirmed facts: {'; '.join(sku.facts[:2])}."
-            ),
-            confidence=0.82,
-            reason="Answered with active or explicitly mentioned SKU facts.",
-            evidence=[sku.name, *sku.facts[:2]],
-        )
-
-    return ExtractedViewerReply(
-        intent="ambiguous",
-        sku_id=None,
-        reply_text="Can you clarify which product you mean? The host can point you to the right item.",
-        confidence=0.5,
-        reason="No grounded SKU was available.",
-        evidence=[],
-        requires_host_confirmation=True,
-    )
-
-
-def _to_action(
-    extracted: ExtractedViewerReply,
-    text: str,
-    state: CommerceState,
-) -> ProposedAction:
-    valid_sku_ids = {sku.id for sku in state.skus}
-    sku_id = extracted.sku_id if extracted.sku_id in valid_sku_ids else None
-    if not sku_id and extracted.sku_id:
-        return ProposedAction(
-            type="noop",
             source_text=text,
             input_source="viewer_message",
-            confidence=0.35,
-            reason=f"ConciergeAgent proposed unknown SKU id: {extracted.sku_id}.",
-            evidence=extracted.evidence,
+            reply_text=reply,
+            viewer=viewer,
+            confidence=max(extracted.confidence, 0.78),
+            reason="Answer from SKU facts, stock, price, and active promotion state.",
+            evidence=[*evidence, *reply_evidence],
         )
-
-    return ProposedAction(
-        type="suggest_reply",
-        source_text=text,
-        input_source="viewer_message",
-        sku_id=sku_id,
-        reply_text=extracted.reply_text,
-        confidence=extracted.confidence,
-        reason=extracted.reason,
-        evidence=extracted.evidence,
-        requires_host_confirmation=extracted.requires_host_confirmation,
     )
+    return actions
 
 
 def analyze_viewer_message(
     text: str,
     viewer: str,
     state: CommerceState,
-) -> tuple[AgentDecision, list[ProposedAction], str | None]:
+) -> tuple[AgentDecision, list[ProposedAction]]:
     try:
-        extracted = _extract_with_openai(text, viewer, state)
-        if extracted is not None:
-            action = _to_action(extracted, text, state)
-            decision = AgentDecision(
-                agent="ConciergeAgent",
-                summary=f"Drafted viewer reply for {extracted.intent} using OpenAI.",
-                confidence=action.confidence,
-                source_text=text,
-            )
-            return decision, [action], extracted.intent
+        extracted = _extract_with_openai(text, state)
+        if extracted is None:
+            extracted = _classify_deterministic(text, state)
     except (ValidationError, ValueError):
-        pass
+        extracted = _classify_deterministic(text, state)
 
-    extracted = _deterministic_reply(text, state)
-    action = _to_action(extracted, text, state)
+    if not _has_commerce_relevance(text, state):
+        extracted = ExtractedViewerMessage(
+            intent="off_topic",
+            confidence=0.9,
+            reason="Viewer message is not related to the live commerce catalogue.",
+            evidence=[text],
+        )
+
+    actions = _build_actions(text, viewer, state, extracted)
     decision = AgentDecision(
         agent="ConciergeAgent",
-        summary=f"Drafted viewer reply for {extracted.intent} using deterministic fallback.",
-        confidence=action.confidence,
+        summary=f"Classified viewer message as {extracted.intent} and proposed {len(actions)} action(s).",
+        confidence=max((action.confidence for action in actions), default=extracted.confidence),
         source_text=text,
     )
-    return decision, [action], extracted.intent
+    return decision, actions

@@ -11,6 +11,7 @@ export type BackendSku = {
 export type ProposedAction = {
   type: string;
   sku_id: string | null;
+  quantity: number | null;
   source_text: string;
   input_source: string;
   price_cents: number | null;
@@ -19,6 +20,7 @@ export type ProposedAction = {
   duration_seconds: number | null;
   stock_limit: number | null;
   reply_text: string | null;
+  viewer: string | null;
   confidence: number;
   reason: string | null;
   evidence: string[];
@@ -36,8 +38,37 @@ export type PendingAction = {
   id: string;
   action: ProposedAction;
   guardrail_result: GuardrailResult;
+  requested_by: string;
   status: "pending" | "approved" | "rejected" | "overridden";
   created_at: string;
+};
+
+export type BackendState = {
+  active_sku_id: string | null;
+  skus: BackendSku[];
+  flash_sale: {
+    sku_id: string;
+    sale_price_cents: number;
+    stock_limit: number;
+    remaining_stock: number;
+    duration_seconds: number;
+    created_at: string;
+  } | null;
+  viewer_sessions: ViewerSession[];
+  viewer_comments: ViewerComment[];
+  viewer_insights: ViewerInsightSnapshot[];
+  checkout_intents: CheckoutIntent[];
+  orders: Order[];
+  pending_actions: PendingAction[];
+  ledger: Array<{
+    id: string;
+    type: string;
+    detail: string;
+    source_text: string | null;
+    payload?: Record<string, unknown>;
+    created_at: string;
+  }>;
+  updated_at: string;
 };
 
 export type ViewerComment = {
@@ -84,40 +115,24 @@ export type CheckoutIntent = {
 
 export type Order = {
   id: string;
-  viewer: string;
   sku_id: string;
   quantity: number;
   unit_price_cents: number;
-  total_price_cents: number;
+  total_price_cents: number | null;
+  viewer: string;
   checkout_intent_id: string | null;
   created_at: string;
 };
 
-export type BackendState = {
-  active_sku_id: string | null;
-  skus: BackendSku[];
-  flash_sale: {
-    sku_id: string;
-    sale_price_cents: number;
-    stock_limit: number;
-    remaining_stock: number;
-    duration_seconds: number;
-    created_at: string;
-  } | null;
-  viewer_comments: ViewerComment[];
-  viewer_insights: ViewerInsightSnapshot[];
-  checkout_intents: CheckoutIntent[];
-  orders: Order[];
-  pending_actions: PendingAction[];
-  ledger: Array<{
-    id: string;
-    type: string;
-    detail: string;
-    source_text: string | null;
-    payload?: Record<string, unknown>;
-    created_at: string;
-  }>;
-  updated_at: string;
+export type ViewerSession = {
+  id: string;
+  username: string;
+  created_at: string;
+};
+
+export type ViewerLoginResponse = {
+  session: ViewerSession;
+  state: BackendState;
 };
 
 export type WorkflowResponse = {
@@ -138,16 +153,8 @@ export type WorkflowResponse = {
     detail: string;
   }>;
   ledger_entries: BackendState["ledger"];
+  suggested_reply: string | null;
   state: BackendState;
-};
-
-export type MediaSession = {
-  session_id: string;
-  status: "waiting" | "offer_ready" | "answer_ready" | "live" | "stopped";
-  offer: RTCSessionDescriptionInit | null;
-  answer: RTCSessionDescriptionInit | null;
-  host_candidates: RTCIceCandidateInit[];
-  viewer_candidates: RTCIceCandidateInit[];
 };
 
 export type CheckoutIntentResponse = {
@@ -158,6 +165,55 @@ export type CheckoutIntentResponse = {
 export type OrderResponse = {
   order: Order;
   state: BackendState;
+};
+
+export type MonitorSignalPayload = {
+  online_viewers: number;
+  online_viewers_delta: number;
+  gpm_cents: number;
+  gpm_delta: number;
+  conversion_rate: number;
+  conversion_rate_delta: number;
+  comment_sentiment: number;
+  interaction_rate: number;
+};
+
+export type MonitorResponse = {
+  agent: "MonitorAgent";
+  scenario: {
+    id: "hesitation" | "spike_push" | "warm_retention" | "cold_warning" | "steady";
+    label: string;
+    reason: string;
+    urgency: "low" | "medium" | "high";
+  };
+  hook: {
+    id: "suspense" | "order_push" | "benefit" | "interaction";
+    label: string;
+    script: string;
+  };
+  signals: Record<string, string>;
+  created_at: string;
+};
+
+export type MediaSession = {
+  session_id: string;
+  status: "waiting" | "offer_ready" | "answer_ready" | "live" | "stopped";
+  offer: RTCSessionDescriptionInit | null;
+  answer: RTCSessionDescriptionInit | null;
+  host_candidates: RTCIceCandidateInit[];
+  viewer_candidates: RTCIceCandidateInit[];
+  viewer_offers: Record<string, RTCSessionDescriptionInit>;
+  viewer_answers: Record<string, RTCSessionDescriptionInit>;
+  viewer_host_candidates: Record<string, RTCIceCandidateInit[]>;
+  viewer_ice_candidates: Record<string, RTCIceCandidateInit[]>;
+  viewer_ids: string[];
+};
+
+export type RealtimeTranscriptionToken = {
+  value: string;
+  expires_at: number | null;
+  session_id: string | null;
+  model: string;
 };
 
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
@@ -205,10 +261,34 @@ export function sendHostTranscript(text: string) {
   });
 }
 
-export function sendViewerMessage(text: string, viewer = "You") {
+export function sendViewerMessage(text: string, viewer = "viewer") {
   return requestJson<WorkflowResponse>("/events/viewer-message", {
     method: "POST",
     body: JSON.stringify({ text, viewer }),
+  });
+}
+
+export function loginViewer(username: string) {
+  return requestJson<ViewerLoginResponse>("/viewer-login", {
+    method: "POST",
+    body: JSON.stringify({ username }),
+  });
+}
+
+export function fetchViewerLogin(sessionId: string) {
+  return requestJson<ViewerLoginResponse>(`/viewer-login/${sessionId}`);
+}
+
+export function logoutViewer(sessionId: string) {
+  return requestJson<ViewerLoginResponse>(`/viewer-login/${sessionId}/logout`, {
+    method: "POST",
+  });
+}
+
+export function sendEditedPendingReply(pendingActionId: string, replyText: string) {
+  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reply`, {
+    method: "POST",
+    body: JSON.stringify({ reply_text: replyText }),
   });
 }
 
@@ -222,7 +302,7 @@ export function generateViewerWordCloud(windowSeconds = 180) {
 export function startCheckoutIntent(
   skuId: string,
   quantity: number,
-  viewer = "You",
+  viewer = "viewer",
 ) {
   return requestJson<CheckoutIntentResponse>("/checkout-intents", {
     method: "POST",
@@ -248,10 +328,40 @@ export function cancelCheckoutIntent(checkoutIntentId: string) {
   );
 }
 
+export function createRealtimeTranscriptionToken() {
+  return requestJson<RealtimeTranscriptionToken>("/events/realtime-transcription-token", {
+    method: "POST",
+  });
+}
+
 export function approvePendingAction(pendingActionId: string) {
   return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/approve`, {
     method: "POST",
   });
+}
+
+export function sendMonitorSignal(payload: MonitorSignalPayload) {
+  return requestJson<MonitorResponse>("/events/monitor-signal", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function transcribeAudio(blob: Blob) {
+  const formData = new FormData();
+  formData.append("file", blob, "host-audio.webm");
+
+  const response = await fetch(`${getBackendUrl()}/events/transcribe-audio`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Transcription failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ text: string; source: string }>;
 }
 
 export function rejectPendingAction(pendingActionId: string) {
@@ -268,21 +378,38 @@ export function fetchMediaSession(sessionId: string) {
   return requestJson<MediaSession>(`/media/session/${sessionId}`);
 }
 
+export function joinMediaSession(sessionId: string, viewerId: string) {
+  return requestJson<MediaSession>(
+    `/media/session/${sessionId}/viewer/${viewerId}`,
+    {
+      method: "POST",
+    },
+  );
+}
+
 export function fetchLatestMediaSession() {
   return requestJson<MediaSession>("/media/session/latest");
 }
 
-export function postMediaOffer(sessionId: string, offer: RTCSessionDescriptionInit) {
+export function postMediaOffer(
+  sessionId: string,
+  offer: RTCSessionDescriptionInit,
+  viewerId?: string,
+) {
   return requestJson<MediaSession>(`/media/session/${sessionId}/offer`, {
     method: "POST",
-    body: JSON.stringify({ role: "host", payload: offer }),
+    body: JSON.stringify({ role: "host", payload: offer, viewer_id: viewerId }),
   });
 }
 
-export function postMediaAnswer(sessionId: string, answer: RTCSessionDescriptionInit) {
+export function postMediaAnswer(
+  sessionId: string,
+  answer: RTCSessionDescriptionInit,
+  viewerId?: string,
+) {
   return requestJson<MediaSession>(`/media/session/${sessionId}/answer`, {
     method: "POST",
-    body: JSON.stringify({ role: "viewer", payload: answer }),
+    body: JSON.stringify({ role: "viewer", payload: answer, viewer_id: viewerId }),
   });
 }
 
@@ -290,10 +417,11 @@ export function postIceCandidate(
   sessionId: string,
   role: "host" | "viewer",
   candidate: RTCIceCandidateInit,
+  viewerId?: string,
 ) {
   return requestJson<MediaSession>(`/media/session/${sessionId}/ice-candidate`, {
     method: "POST",
-    body: JSON.stringify({ role, payload: candidate }),
+    body: JSON.stringify({ role, payload: candidate, viewer_id: viewerId }),
   });
 }
 

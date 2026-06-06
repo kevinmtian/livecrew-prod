@@ -59,12 +59,14 @@ class ProposedAction(BaseModel):
     source_text: str
     input_source: InputSource
     sku_id: str | None = None
+    quantity: int | None = None
     price_cents: int | None = None
     stock: int | None = None
     sale_price_cents: int | None = None
     duration_seconds: int | None = None
     stock_limit: int | None = None
     reply_text: str | None = None
+    viewer: str | None = None
     confidence: float = 0.0
     reason: str | None = None
     evidence: list[str] = Field(default_factory=list)
@@ -91,6 +93,27 @@ class AppliedAction(BaseModel):
     type: ActionType
     sku_id: str | None = None
     detail: str
+
+
+class Order(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("order"))
+    sku_id: str
+    quantity: int
+    unit_price_cents: int
+    viewer: str
+    total_price_cents: int | None = None
+    checkout_intent_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+    def model_post_init(self, __context: Any) -> None:
+        if self.total_price_cents is None:
+            self.total_price_cents = self.unit_price_cents * self.quantity
+
+
+class ViewerSession(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("viewer-session"))
+    username: str
+    created_at: datetime = Field(default_factory=utc_now)
 
 
 class LedgerEntry(BaseModel):
@@ -144,21 +167,11 @@ class CheckoutIntent(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
-class Order(BaseModel):
-    id: str = Field(default_factory=lambda: create_id("order"))
-    viewer: str = "viewer"
-    sku_id: str
-    quantity: int = Field(ge=1)
-    unit_price_cents: int = Field(ge=1)
-    total_price_cents: int = Field(ge=1)
-    checkout_intent_id: str | None = None
-    created_at: datetime = Field(default_factory=utc_now)
-
-
 class PendingAction(BaseModel):
     id: str = Field(default_factory=lambda: create_id("pending"))
     action: ProposedAction
     guardrail_result: GuardrailResult
+    requested_by: Literal["cohost", "concierge", "guardrail", "host_ui"] = "guardrail"
     status: Literal["pending", "approved", "rejected", "overridden"] = "pending"
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -167,6 +180,7 @@ class CommerceState(BaseModel):
     active_sku_id: str | None = None
     skus: list[SKU]
     flash_sale: FlashSale | None = None
+    viewer_sessions: list[ViewerSession] = Field(default_factory=list)
     viewer_comments: list[ViewerComment] = Field(default_factory=list)
     viewer_insights: list[ViewerInsightSnapshot] = Field(default_factory=list)
     checkout_intents: list[CheckoutIntent] = Field(default_factory=list)
@@ -183,6 +197,7 @@ class WorkflowResponse(BaseModel):
     pending_actions: list[PendingAction] = Field(default_factory=list)
     applied_actions: list[AppliedAction] = Field(default_factory=list)
     ledger_entries: list[LedgerEntry] = Field(default_factory=list)
+    suggested_reply: str | None = None
     state: CommerceState
 
 
@@ -194,6 +209,19 @@ class TextEventRequest(BaseModel):
 class ViewerMessageRequest(BaseModel):
     viewer: str = "viewer"
     text: str
+
+
+class ViewerLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+
+
+class ViewerLoginResponse(BaseModel):
+    session: ViewerSession
+    state: CommerceState
+
+
+class PendingReplyRequest(BaseModel):
+    reply_text: str | None = None
 
 
 class ViewerInsightRequest(BaseModel):
@@ -216,9 +244,48 @@ class OrderResponse(BaseModel):
     state: CommerceState
 
 
+class MonitorSignalRequest(BaseModel):
+    online_viewers: int = Field(ge=0)
+    online_viewers_delta: float
+    gpm_cents: int = Field(ge=0)
+    gpm_delta: float
+    conversion_rate: float = Field(ge=0)
+    conversion_rate_delta: float
+    comment_sentiment: float = Field(ge=0, le=1)
+    interaction_rate: float = Field(ge=0)
+
+
+class MonitorScenario(BaseModel):
+    id: Literal["hesitation", "spike_push", "warm_retention", "cold_warning", "steady"]
+    label: str
+    reason: str
+    urgency: Literal["low", "medium", "high"]
+
+
+class MonitorHook(BaseModel):
+    id: Literal["suspense", "order_push", "benefit", "interaction"]
+    label: str
+    script: str
+
+
+class MonitorResponse(BaseModel):
+    agent: Literal["MonitorAgent"] = "MonitorAgent"
+    scenario: MonitorScenario
+    hook: MonitorHook
+    signals: dict[str, str]
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class TranscriptionResponse(BaseModel):
     text: str
     source: Literal["openai", "unavailable"]
+
+
+class RealtimeTranscriptionTokenResponse(BaseModel):
+    value: str
+    expires_at: int | None = None
+    session_id: str | None = None
+    model: str
 
 
 class MediaSession(BaseModel):
@@ -230,6 +297,11 @@ class MediaSession(BaseModel):
     answer: dict[str, Any] | None = None
     host_candidates: list[dict[str, Any]] = Field(default_factory=list)
     viewer_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    viewer_offers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    viewer_answers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    viewer_host_candidates: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    viewer_ice_candidates: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    viewer_ids: list[str] = Field(default_factory=list)
 
 
 class SessionCreateResponse(BaseModel):
@@ -239,3 +311,4 @@ class SessionCreateResponse(BaseModel):
 class SignalPayload(BaseModel):
     payload: dict[str, Any]
     role: Literal["host", "viewer"] = "host"
+    viewer_id: str | None = None

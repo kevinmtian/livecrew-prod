@@ -241,6 +241,7 @@ class CommerceState(BaseModel):
     active_sku_id: str | None
     skus: list[SKU]
     flash_sale: FlashSale | None
+    viewer_sessions: list[ViewerSession]
     viewer_comments: list[ViewerComment]
     viewer_insights: list[ViewerInsightSnapshot]
     checkout_intents: list[CheckoutIntent]
@@ -255,15 +256,16 @@ Important rules:
 
 - `active_sku_id` represents the product currently displayed in the live room.
 - SKU stock and prices are backend source of truth.
-- Viewer comments are backend source of truth for ConciergeAgent replies and host monitoring.
-- Viewer insight snapshots summarize the most recent three-minute comment window for the host cockpit.
-- Checkout intents represent viewers who opened a purchase confirmation modal but have not yet confirmed or cancelled.
+- Viewer sessions store active username-only logins for the current demo run.
+- Viewer comments are backend source of truth for ConciergeAgent replies and host word-cloud analysis.
+- Viewer insight snapshots summarize recent viewer demand for the host cockpit.
+- Checkout intents represent viewers who opened a purchase confirmation modal but have not confirmed or cancelled.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
 - Pending actions represent proposals waiting for host approval and must not change commerce state.
 - Reset restores SKUs to seeded stock and prices, then clears orders, flash sale, active SKU, announcements, pending actions, metrics, and ledger.
-- Reset clears viewer comments and viewer insight snapshots.
-- Reset clears checkout intents and orders.
+- Reset clears viewer sessions so usernames can be reused in the next demo run.
+- Reset clears viewer comments, viewer insights, checkout intents, and orders.
 
 ## 7. Host Transcript and Text Commands as Action Stream
 
@@ -423,6 +425,7 @@ Rules:
 
 - Guardrails convert ambiguous, low-confidence, or risky actions into pending actions.
 - `noop` and non-actionable host speech must never enter the pending confirmation queue.
+- `noop` is an internal no-action result and must not be appended to the event ledger or displayed in the host ledger timeline.
 - Pending actions are stored in `CommerceState.pending_actions` and broadcast to the host cockpit.
 - Pending actions do not mutate SKU, price, promotion, order, stock, or KPI state.
 - Approving a pending action sends the original action back through guardrails with approval context, then into the commerce service.
@@ -493,36 +496,24 @@ Output:
 Responsibilities:
 
 - Classify viewer messages.
-- Resolve SKU from explicit mention first, then active SKU.
+- Return no proposed actions for totally irrelevant viewer messages.
+- Resolve SKU from explicit mention first, then the active pinned SKU for contextual product references.
+- Return no proposed actions when a product question cannot be grounded to a SKU.
 - Extract order quantity from natural language.
 - Generate grounded product replies from SKU facts and current commerce state.
+- Say that a detail cannot be verified when the requested product detail is not present in grounded SKU facts or current commerce state.
 - Propose `create_order` only when order intent is clear.
-- Escalate ambiguous SKU, unclear quantity, unsupported discounts, and unsafe claims.
-- Produce per-message suggested replies that the host can use or ignore in the cockpit.
+- Escalate unclear quantity, unsupported discounts, health or allergy questions, unsafe claims, and unverified promotion or guarantee requests as pending host-reviewed reply drafts.
 
 It cannot invent discounts, delivery promises, authenticity claims, medical guarantees, or unsupported product claims.
 
-### ViewerInsightsAgent
+Host escalation behavior:
 
-Input:
-
-- Current `CommerceState`
-- Viewer comments created in the previous three minutes
-- Current active SKU and seeded SKU facts
-
-Output:
-
-- `ViewerInsightSnapshot`
-
-Responsibilities:
-
-- Run every minute when requested by the host cockpit.
-- Build a weighted word cloud from recent viewer language, SKU aliases, intent terms, and repeated product questions.
-- Summarize what viewers are asking for in one short operational sentence.
-- Suggest grounded host talking points or replies using only SKU facts and current backend commerce state.
-- Use OpenAI for concise theme clustering when available, with deterministic fallback when OpenAI is unavailable or returns invalid output.
-
-ViewerInsightsAgent is read-only. It may append a `viewer_word_cloud_generated` ledger event and store a snapshot, but it must not mutate SKU, price, stock, flash sale, order, or pending confirmation state.
+- Risky ConciergeAgent replies are stored as pending `suggest_reply` actions with `requested_by="concierge"`.
+- Pending escalation payloads include the viewer raw question, escalation reason, and drafted reply.
+- The host cockpit can accept the draft, edit and send the draft, or discard it with no viewer reply.
+- Accepted or edited replies are validated by guardrails before being recorded as `answer_suggested` ledger events and returned to the frontend as `suggested_reply`.
+- Discarded drafts append a `host_confirmation_resolved` ledger event and do not emit a suggested reply.
 
 ### GuardrailNode
 
@@ -650,7 +641,12 @@ GET  /events/stream
 POST /events/host-transcript
 POST /events/host-command
 POST /events/viewer-message
+POST /events/realtime-transcription-token
 POST /viewer-insights/word-cloud
+
+POST /viewer-login
+GET  /viewer-login/{session_id}
+POST /viewer-login/{session_id}/logout
 
 POST /checkout-intents
 POST /checkout-intents/{checkout_intent_id}/confirm
@@ -667,6 +663,7 @@ GET  /report
 POST /api/eval/run-agent-suite
 
 POST /media/session
+POST /media/session/{session_id}/viewer/{viewer_id}
 POST /media/session/{session_id}/offer
 POST /media/session/{session_id}/answer
 POST /media/session/{session_id}/ice-candidate
@@ -686,6 +683,35 @@ Request:
   "text": "Switch to the tumbler, make it 22, and first 20 orders get 18.8 for five minutes."
 }
 ```
+
+### `POST /events/realtime-transcription-token`
+
+Creates a short-lived OpenAI Realtime client secret for browser microphone transcription.
+This endpoint is the only browser-facing OpenAI credential path. It uses the server-side
+`OPENAI_API_KEY` and returns only the ephemeral client secret value and metadata needed
+to initialize a WebRTC transcription session.
+
+Request: empty JSON body or no body.
+
+Response:
+
+```json
+{
+  "value": "ek_...",
+  "expires_at": 1767225600,
+  "session_id": "sess_...",
+  "model": "gpt-4o-transcribe"
+}
+```
+
+Backend behavior:
+
+- Use a Realtime transcription session with `type: "transcription"`.
+- Default the transcription model to `gpt-4o-transcribe`, configurable by `OPENAI_REALTIME_TRANSCRIPTION_MODEL`.
+- Use server VAD for turn boundaries so only completed speech turns are sent to `POST /events/host-transcript`.
+- Include SKU names and aliases as transcription vocabulary guidance when the selected model supports prompt guidance.
+- Return a clear `503` error when `OPENAI_API_KEY` is missing or the OpenAI client-secret request fails.
+- Never write the ephemeral client secret to the ledger.
 
 Response:
 
@@ -727,6 +753,8 @@ Request:
 ```
 
 Response should include decisions, guardrail result, applied actions, ledger entries, and updated state.
+Irrelevant or ungrounded messages may return an empty `proposed_actions` list and `suggested_reply: null`.
+Risky messages return a pending ConciergeAgent `suggest_reply` action and `suggested_reply: null` until host review.
 
 Preferred shared response shape:
 
@@ -748,8 +776,8 @@ Viewer message handling rules:
 - The route records the raw viewer message in `CommerceState.viewer_comments`.
 - ConciergeAgent analyzes the message against the active SKU and catalogue.
 - If a grounded reply is safe, it returns a `suggest_reply` action and stores that reply on the viewer comment.
-- If the message asks for unsupported discounts, medical guarantees, delivery promises, authenticity claims, or other unsafe claims, the suggested reply should safely decline or route to host confirmation without inventing facts.
-- The ledger records `viewer_message_received` and either `answer_suggested`, `guardrail_block`, or `host_escalation`.
+- Risky or unsupported claims are escalated to the host instead of inventing facts.
+- The ledger records `viewer_message_received` and the reply, block, or escalation outcome.
 
 ### `POST /viewer-insights/word-cloud`
 
@@ -785,62 +813,81 @@ Rules:
 - Terms are sorted by descending weight.
 - OpenAI may cluster terms and draft summary text, but the backend validates the returned term shape and falls back to deterministic extraction if needed.
 - The snapshot is stored in `CommerceState.viewer_insights` and a `viewer_word_cloud_generated` ledger entry is appended.
-- The route is read-only with respect to commerce state: it must not change products, prices, stock, flash sales, orders, or pending actions.
 
 ### Viewer Purchase Endpoints
 
-`POST /checkout-intents`
+`POST /checkout-intents` creates a pending checkout intent when a viewer opens the purchase confirmation modal.
 
 Request:
 
 ```json
 {
-  "viewer": "viewer_12",
+  "viewer": "alice",
   "sku_id": "bamboo-thermal-tumbler",
   "quantity": 2
+}
+```
+
+Rules:
+
+- SKU must be grounded to an existing backend SKU.
+- Quantity must be positive and must not exceed current purchasable quantity.
+- Unit price is snapshotted from the backend current purchase price when the intent is created.
+- A `checkout_intent_started` ledger event is appended.
+
+`POST /checkout-intents/{checkout_intent_id}/confirm` confirms a pending checkout intent, creates an order, reduces SKU stock, reduces flash-sale remaining stock when applicable, and appends `order_created` plus `checkout_intent_confirmed` ledger events.
+
+`POST /checkout-intents/{checkout_intent_id}/cancel` marks a pending checkout intent as cancelled, does not reduce stock, and appends `checkout_intent_cancelled`.
+
+Host checkout nudge rules:
+
+- The host cockpit computes hesitant checkout viewers from backend `checkout_intents`.
+- Pending checkout intents older than five seconds count as hesitant.
+- Count unique viewers and show a product breakdown by SKU.
+
+### Viewer Login Routes
+
+`POST /viewer-login`
+
+Request:
+
+```json
+{
+  "username": "alice"
 }
 ```
 
 Response:
 
 ```python
-class CheckoutIntentResponse(BaseModel):
-    checkout_intent: CheckoutIntent
+class ViewerLoginResponse(BaseModel):
+    session: ViewerSession
     state: CommerceState
 ```
 
 Rules:
 
-- SKU must be grounded to an existing backend SKU.
-- Quantity must be a positive integer.
-- Quantity must not exceed current purchasable quantity.
-- Unit price is snapshotted from the backend current purchase price when the intent is created.
-- A `checkout_intent_started` ledger event is appended.
+- Username is trimmed before validation.
+- Username must be non-empty and short enough for the viewer UI.
+- Active usernames are compared case-insensitively.
+- If the username is already active, return `409 Conflict`.
+- Successful login stores a backend viewer session and appends a `viewer_logged_in` ledger event.
 
-`POST /checkout-intents/{checkout_intent_id}/confirm`
+`GET /viewer-login/{session_id}` returns the active viewer session for current-page validation, or `404` when the session is no longer valid. The browser should not persist this session across `/viewer` reloads; each new viewer entry should log in again to simulate multiple users on one device.
 
-Rules:
+`POST /viewer-login/{session_id}/logout` removes the viewer session, appends `viewer_logged_out`, and allows the username to be reused.
 
-- Only pending checkout intents may be confirmed.
-- Confirmation revalidates current stock and flash-sale remaining stock before creating an order.
-- Confirmed orders record SKU id, viewer, quantity, unit price, total price, and checkout intent id.
-- Confirmation reduces SKU stock and flash-sale remaining stock when the flash sale price is used.
-- Ledger events include `order_created` and `checkout_intent_confirmed`.
+### `POST /actions/{pending_action_id}/approve`
 
-`POST /checkout-intents/{checkout_intent_id}/cancel`
+Accept a pending ConciergeAgent reply draft and send it to the viewer after guardrail validation.
 
-Rules:
+### `POST /actions/{pending_action_id}/reply`
 
-- Pending checkout intents may be cancelled by the viewer closing the modal.
-- Cancelled checkout intents do not reduce stock and no longer count toward host nudges.
-- A `checkout_intent_cancelled` ledger event is appended.
+Send an edited reply for a pending ConciergeAgent escalation after guardrail validation.
 
-Host checkout nudge rules:
+### `POST /actions/{pending_action_id}/reject`
 
-- The host cockpit computes hesitant checkout viewers from backend `checkout_intents`.
-- Pending checkout intents older than five seconds should count as hesitant.
-- Count unique viewers, not only total intents.
-- Show a product breakdown by SKU so the host can encourage viewers verbally.
+Discard a pending ConciergeAgent escalation without sending a viewer reply.
 
 ## 12. Realtime Updates
 
@@ -909,6 +956,10 @@ Backend behavior:
 
 - `media_signaling.py` stores ephemeral session metadata only.
 - Media sessions should be resettable and should expire when the host stops streaming or refreshes for too long.
+- A media session supports multiple viewers by `viewer_id`. Each viewer receives its own WebRTC offer from the host, submits its own answer, and exchanges ICE candidates in viewer-scoped candidate lists.
+- The host creates one `RTCPeerConnection` per active viewer because a single peer connection cannot serve multiple independent viewer answers.
+- `POST /media/session/{session_id}/viewer/{viewer_id}` registers a viewer as waiting for a viewer-scoped offer.
+- `SignalPayload.viewer_id` scopes offer, answer, and ICE candidate payloads to a specific viewer when present. Legacy unscoped fields may remain for compatibility but should not be used for multi-viewer playback.
 - Media state changes may broadcast lightweight realtime events such as `host_stream_started` and `host_stream_stopped`.
 - Media failures should not block commerce state, viewer chat, product shelf updates, or agent workflows.
 
@@ -987,6 +1038,8 @@ price_restored
 answer_suggested
 viewer_message_received
 viewer_word_cloud_generated
+viewer_logged_in
+viewer_logged_out
 guardrail_block
 host_escalation
 host_confirmation_requested
@@ -1018,6 +1071,8 @@ class LedgerEntry(BaseModel):
 ```
 
 The ledger is the evidence layer for timeline UI, evaluation, and post-stream reporting.
+
+`noop` is intentionally excluded from ledger event types. It may appear in proposed agent output as an internal no-action result, but non-actionable speech should not create a ledger entry.
 
 For Producer reports, listed SKUs must be derived from `list_product` and `create_flash_sale` ledger events. `active_sku_changed` may be retained as a realtime event name, but report calculations should use the ledger event names above. Reset clears the current session ledger instead of adding a `state_reset` entry to it.
 

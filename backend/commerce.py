@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import timedelta
+from typing import Literal
+
 from backend.models import (
     AppliedAction,
     CheckoutIntent,
@@ -16,23 +19,44 @@ from backend.policies.guardrails import validate_action
 from backend.tools.sku_resolver import get_sku_by_id
 
 
-def _is_flash_sale_active(state: CommerceState, sku_id: str) -> bool:
-    sale = state.flash_sale
-    if not sale or sale.sku_id != sku_id:
+RequestedBy = Literal["cohost", "concierge", "guardrail", "host_ui"]
+
+
+def _requested_by(action: ProposedAction) -> RequestedBy:
+    if action.input_source == "viewer_message":
+        return "concierge"
+    if action.input_source == "host_ui":
+        return "host_ui"
+    return "cohost"
+
+
+def _flash_sale_applies(action: ProposedAction, state: CommerceState) -> bool:
+    if not state.flash_sale or not action.sku_id or not action.quantity:
         return False
-    elapsed_seconds = (utc_now() - sale.created_at).total_seconds()
-    return elapsed_seconds <= sale.duration_seconds and sale.remaining_stock > 0
+    if state.flash_sale.sku_id != action.sku_id:
+        return False
+    if state.flash_sale.remaining_stock < action.quantity:
+        return False
+
+    ends_at = state.flash_sale.created_at + timedelta(seconds=state.flash_sale.duration_seconds)
+    return utc_now() <= ends_at
 
 
-def get_purchase_terms(
-    state: CommerceState,
-    sku_id: str,
-) -> tuple[int, int]:
+def _flash_sale_available_for_sku(state: CommerceState, sku_id: str) -> bool:
+    if not state.flash_sale or state.flash_sale.sku_id != sku_id:
+        return False
+    if state.flash_sale.remaining_stock <= 0:
+        return False
+    ends_at = state.flash_sale.created_at + timedelta(seconds=state.flash_sale.duration_seconds)
+    return utc_now() <= ends_at
+
+
+def get_purchase_terms(state: CommerceState, sku_id: str) -> tuple[int, int]:
     sku = get_sku_by_id(sku_id, state.skus)
     if not sku:
         return 0, 0
 
-    if _is_flash_sale_active(state, sku_id) and state.flash_sale:
+    if _flash_sale_available_for_sku(state, sku_id) and state.flash_sale:
         return state.flash_sale.sale_price_cents, min(sku.stock, state.flash_sale.remaining_stock)
 
     return sku.price_cents, sku.stock
@@ -107,7 +131,11 @@ def confirm_checkout_intent(
         raise ValueError(f"Only {available_quantity} unit(s) are available.")
 
     sku.stock -= intent.quantity
-    if _is_flash_sale_active(state, intent.sku_id) and state.flash_sale:
+    if (
+        _flash_sale_available_for_sku(state, intent.sku_id)
+        and state.flash_sale
+        and unit_price_cents == state.flash_sale.sale_price_cents
+    ):
         state.flash_sale.remaining_stock -= intent.quantity
 
     intent.status = "confirmed"
@@ -167,9 +195,13 @@ def apply_action(
     action: ProposedAction,
     guardrail: GuardrailResult,
     state: CommerceState,
-) -> tuple[AppliedAction | None, LedgerEntry]:
+) -> tuple[AppliedAction | None, LedgerEntry | None]:
     if guardrail.status == "needs_host_confirmation":
-        pending = PendingAction(action=action, guardrail_result=guardrail)
+        pending = PendingAction(
+            action=action,
+            guardrail_result=guardrail,
+            requested_by=_requested_by(action),
+        )
         state.pending_actions.insert(0, pending)
         return None, LedgerEntry(
             type="host_confirmation_requested",
@@ -184,6 +216,66 @@ def apply_action(
             detail=guardrail.reason,
             source_text=action.source_text,
             payload={"action": action.model_dump(mode="json")},
+        )
+
+    if action.type == "suggest_reply" and action.reply_text:
+        return (
+            AppliedAction(type=action.type, sku_id=action.sku_id, detail=action.reply_text),
+            LedgerEntry(
+                type="answer_suggested",
+                detail=action.reply_text,
+                source_text=action.source_text,
+                payload={
+                    "sku_id": action.sku_id,
+                    "viewer": action.viewer,
+                    "reply_text": action.reply_text,
+                    "evidence": action.evidence,
+                },
+            ),
+        )
+
+    if action.type == "create_order" and action.sku_id and action.quantity:
+        sku = get_sku_by_id(action.sku_id, state.skus)
+        if not sku:
+            return None, LedgerEntry(
+                type="guardrail_block",
+                detail="Order references an unknown SKU.",
+                source_text=action.source_text,
+                payload={"action": action.model_dump(mode="json")},
+            )
+
+        unit_price_cents = (
+            state.flash_sale.sale_price_cents
+            if _flash_sale_applies(action, state) and state.flash_sale
+            else sku.price_cents
+        )
+        sku.stock -= action.quantity
+        if (
+            state.flash_sale
+            and state.flash_sale.sku_id == action.sku_id
+            and unit_price_cents == state.flash_sale.sale_price_cents
+        ):
+            state.flash_sale.remaining_stock -= action.quantity
+
+        order = Order(
+            sku_id=action.sku_id,
+            quantity=action.quantity,
+            unit_price_cents=unit_price_cents,
+            viewer=action.viewer or "viewer",
+        )
+        state.orders.insert(0, order)
+        detail = (
+            f"Recorded order for {action.quantity} x {sku.name} at "
+            f"${unit_price_cents / 100:.2f}."
+        )
+        return (
+            AppliedAction(type=action.type, sku_id=action.sku_id, detail=detail),
+            LedgerEntry(
+                type="order_created",
+                detail=detail,
+                source_text=action.source_text,
+                payload=order.model_dump(mode="json"),
+            ),
         )
 
     if action.type == "set_active_sku" and action.sku_id:
@@ -278,28 +370,7 @@ def apply_action(
             LedgerEntry(type="flash_sale_cancelled", detail=detail, source_text=action.source_text),
         )
 
-    if action.type == "suggest_reply":
-        detail = "ConciergeAgent drafted a grounded viewer reply."
-        return (
-            AppliedAction(type=action.type, sku_id=action.sku_id, detail=detail),
-            LedgerEntry(
-                type="answer_suggested",
-                detail=detail,
-                source_text=action.source_text,
-                payload={
-                    "sku_id": action.sku_id,
-                    "reply_text": action.reply_text,
-                    "evidence": action.evidence,
-                },
-            ),
-        )
-
-    return None, LedgerEntry(
-        type="noop",
-        detail=action.reason or "No action applied.",
-        source_text=action.source_text,
-        payload={"action": action.model_dump(mode="json")},
-    )
+    return None, None
 
 
 def _find_pending_action(
@@ -340,7 +411,10 @@ def approve_pending_action(
     )
 
     applied_actions = [applied] if applied else []
-    return applied_actions, [guardrail], [resolution_ledger, action_ledger]
+    ledger_entries = [resolution_ledger]
+    if action_ledger:
+        ledger_entries.append(action_ledger)
+    return applied_actions, [guardrail], ledger_entries
 
 
 def reject_pending_action(

@@ -155,6 +155,7 @@ Requirements:
 
 - Deterministic evaluation cases should exist for agent routing, SKU grounding, guardrail decisions, and commerce execution.
 - Ledger entries should explain why an action was applied, blocked, or escalated.
+- Internal `noop` decisions should not be shown in the host ledger because they are non-events, not evidence of an applied, blocked, or escalated commerce action.
 - Agent outputs should include confidence, reason, and evidence.
 - The host UI should expose enough timeline detail to debug a wrong action during the demo.
 
@@ -217,8 +218,10 @@ Host speaks: "Let's show the tumbler now."
 Expected behavior:
 
 - The host cockpit should provide a microphone-driven transcription flow for the demo.
-- Host audio should use a realtime transcription flow for low-latency transcript display.
+- Host audio should use an OpenAI Realtime transcription flow for low-latency transcript display.
+- The backend should create short-lived OpenAI Realtime transcription credentials; the browser must not receive the long-lived `OPENAI_API_KEY`.
 - The host cockpit should show in-progress transcript text in the livestream panel while the host is speaking.
+- The livestream transcript area should use a quiet, integrated caption-console style rather than an alert-colored debug frame.
 - Only finalized transcript segments should trigger commerce actions.
 - Each finalized transcript segment should become a normalized `host_transcript` event.
 - Transcript events should include timestamp, source, text, and processing status.
@@ -228,7 +231,9 @@ Expected behavior:
 Acceptance criteria:
 
 - While the host is speaking during a live stream, transcript text appears in the livestream transcript area.
+- Transcript preview, finalized transcript lines, idle state, and transcription errors remain readable without visually competing with the live video.
 - With `OPENAI_API_KEY` configured, host speech can produce finalized transcript events for CoHostAgent processing.
+- The host cockpit can receive OpenAI Realtime transcription delta events for preview and completed transcription events for backend processing.
 - A finalized transcript segment can trigger CoHostAgent intent recognition.
 - If transcription fails, no commerce state is mutated.
 - The host can still use the typed CoHost debug input as a fallback for hackathon reliability.
@@ -281,7 +286,7 @@ Acceptance criteria:
 
 - On a Mac with browser camera and microphone permission granted, `/host` can capture local media and `/viewer` can play the live host stream.
 - The host can stop the stream and the viewer room reflects that the stream is offline.
-- Media permission failure does not break product shelf, chat, agent queue, or commerce state.
+- Media permission failure does not break product shelf, chat, CoHost Agent queue, or commerce state.
 - The implementation uses browser-native media capture and a lightweight realtime transport suitable for the hackathon demo.
 
 ### FR-0C: Mobile Viewer Room Layout
@@ -306,6 +311,30 @@ Acceptance criteria:
 - The livestream section occupies roughly two-thirds of the phone frame and the chat section roughly one-third.
 - Changing the active SKU from `/host` updates the product information shown over the livestream area.
 - The chat panel remains usable without overlapping the product overlay.
+
+### FR-0D: Viewer Username Login
+
+The viewer room should require a simple username login before a viewer can watch or interact with the livestream.
+
+Expected behavior:
+
+- Accessing `/viewer` without a valid viewer session should show a username login screen by default.
+- The viewer should be able to log in with a username only; no password or external identity provider is required for the hackathon demo.
+- The Python backend should store active viewer usernames for the current demo session.
+- A username that is already active in backend state must not be allowed to log in again from another viewer session.
+- Login should return a backend viewer session id and username.
+- The browser should not persist the viewer session for automatic reuse; each new `/viewer` entry, tab, or refresh should show login again so the demo can simulate multiple users on one device.
+- If the current in-memory session no longer exists on the backend, `/viewer` should return to the login screen.
+- Logged-in usernames should be used for viewer chat and commerce actions instead of a generic local `"You"` label.
+- Reset should clear active viewer sessions.
+
+Acceptance criteria:
+
+- Opening `/viewer` with no stored valid session shows the login form, not the livestream room.
+- A viewer can enter a unique username and then enter the livestream room.
+- A second viewer cannot log in with the same active username.
+- Refreshing or reopening `/viewer` requires logging in again, even on the same device.
+- Clearing backend state invalidates stored viewer sessions and requires login again.
 
 ### FR-1: Detect Product Mentions and List SKU
 
@@ -498,19 +527,25 @@ Examples:
 Expected behavior:
 
 - The ConciergeAgent uses the OpenAI API to classify viewer intent and draft a response.
-- Product questions should resolve SKU by explicit mention first, then active SKU.
+- Totally irrelevant viewer messages should produce a no-reply decision and should not send an automatic chat reply.
+- Product questions should resolve SKU by explicit mention first, then the active pinned SKU for contextual references such as "this product".
+- If a product question cannot be grounded to an identified SKU, the ConciergeAgent should produce a no-reply decision instead of guessing.
 - Answers must use SKU facts and current backend state such as price, stock, and active flash sale.
+- If the requested product detail is not present in grounded facts or current commerce state, the reply should say the system cannot verify that detail.
 - The agent may answer routine grounded questions without host approval.
 - The agent must not invent discounts, delivery promises, authenticity claims, medical guarantees, or unsupported product claims.
-- Risky, ambiguous, or unsupported requests should be escalated to the host.
+- Risky or unsupported requests, including discount, health, allergy, medical, skin safety, delivery, authenticity, or unsupported guarantee questions, should be escalated to the host without sending an automatic viewer reply.
+- Escalations should show the viewer's raw question, escalation reason, ConciergeAgent drafted reply, and controls for the host to accept, edit and send, or discard the reply.
 - Viewer Q&A events should be recorded for analytics and report generation.
+- The host cockpit's Viewer Room / Host Reply area should show the reply record, including the original viewer question and automatic or host-approved reply when one is sent.
 
 Acceptance criteria:
 
 - Product fact questions produce `suggest_reply` actions with grounded evidence and structured LLM output.
-- Unsupported discount requests are blocked or escalated.
+- Unsupported discount and health-related requests are escalated as pending host-review drafts and do not auto-send.
+- Irrelevant or ungrounded messages produce no suggested reply.
 - Ambiguous questions ask for clarification or host confirmation.
-- Host confirmations are visible in the agent queue and are stored in backend state, not only in local UI state.
+- Host confirmations are visible in the CoHost Agent queue and are stored in backend state, not only in local UI state.
 - Pending host confirmations in the host cockpit should provide approve and reject controls that resolve the backend pending action.
 - Replies reference current backend price and promotion state when relevant.
 - The event ledger records suggested replies and blocked claims.
@@ -670,11 +705,17 @@ The expected result is that new functionality plugs into the framework instead o
 The frontend should include:
 
 - Host microphone/transcription controls for the OpenAI realtime transcription flow.
-- Host text command input for CoHostAgent debugging.
+- Host text command input for CoHost Agent debugging.
 - Host camera and microphone permission controls.
 - Host local video preview with live/offline/muted states.
-- Host cockpit showing live transcript, active SKU, price, stock, flash sale, agent queue, and ledger.
+- Host cockpit showing live transcript, active SKU, price, stock, flash sale, CoHost Agent Suggested Actions queue, and a CoHost Agent Event Timeline ledger panel.
+- Dashboard panels should show only the main panel title, without smaller eyebrow labels above it.
+- CoHost Agent queue and ledger history should use matching bounded scroll areas so long demo runs do not stretch the cockpit layout.
+- On desktop, Monitor Agent and CoHost Agent Event Timeline should sit side by side with matching width and height.
+- When the timeline is moved beside Monitor Agent, the host cockpit should use a wider desktop canvas instead of shrinking the existing module widths.
+- On desktop, the camera/microphone panel, CoHost Agent queue group, and ledger panel should share a clean lower alignment, with the live transcript expanding to fill available space.
 - Viewer room styled as a mobile livestream commerce room.
+- The viewer route should present the mobile livestream frame directly, without the shared dashboard header above it.
 - Viewer livestream area occupying the top two-thirds of the mobile room.
 - Viewer chat area occupying the bottom one-third of the mobile room.
 - Viewer product overlay showing active SKU name, price, stock, and short grounded facts during the livestream.

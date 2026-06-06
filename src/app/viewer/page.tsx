@@ -1,8 +1,10 @@
 "use client";
 
-import { AppShell, StatusPill } from "@/components/dashboard";
+import { StatusPill } from "@/components/dashboard";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
+  appendAgentReply,
+  appendViewerMessage,
   defaultLocalRoomState,
   type LocalRoomState,
   readLocalRoomState,
@@ -11,12 +13,15 @@ import {
 import {
   type BackendState,
   type CheckoutIntent,
+  type ViewerSession,
   cancelCheckoutIntent,
   confirmCheckoutIntent,
   fetchBackendState,
   fetchLatestMediaSession,
   fetchMediaSession,
-  getBackendUrl,
+  joinMediaSession,
+  loginViewer,
+  logoutViewer,
   postIceCandidate,
   postMediaAnswer,
   sendViewerMessage,
@@ -49,28 +54,8 @@ const initialReplies: RoomReply[] = [
   },
 ];
 
-const VIEWER_ID_STORAGE_KEY = "livecrew.viewer-id.v1";
-
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
-}
-
-function getViewerIdentity() {
-  if (typeof window === "undefined") {
-    return "viewer";
-  }
-
-  const existingId = window.localStorage.getItem(VIEWER_ID_STORAGE_KEY);
-  if (existingId) {
-    return existingId;
-  }
-
-  const nextId =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? `viewer-${crypto.randomUUID().slice(0, 8)}`
-      : `viewer-${Date.now().toString(36)}`;
-  window.localStorage.setItem(VIEWER_ID_STORAGE_KEY, nextId);
-  return nextId;
 }
 
 function getFlashSaleSecondsLeft(
@@ -95,10 +80,12 @@ export default function ViewerPage() {
   const [streamError, setStreamError] = useState("");
   const [backendState, setBackendState] = useState<BackendState | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [messageStatus, setMessageStatus] = useState<
-    "idle" | "sending" | "failed"
-  >("idle");
-  const [remoteMuted, setRemoteMuted] = useState(true);
+  const [messageStatus, setMessageStatus] = useState<"idle" | "sending">("idle");
+  const [messageError, setMessageError] = useState("");
+  const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null);
+  const [loginInput, setLoginInput] = useState("");
+  const [loginStatus, setLoginStatus] = useState<"idle" | "submitting">("idle");
+  const [loginError, setLoginError] = useState("");
   const [purchaseQuantity, setPurchaseQuantity] = useState(1);
   const [checkoutIntent, setCheckoutIntent] = useState<CheckoutIntent | null>(
     null,
@@ -109,11 +96,11 @@ export default function ViewerPage() {
   const [checkoutError, setCheckoutError] = useState("");
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const chatListRef = useRef<HTMLDivElement | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const hostCandidateCountRef = useRef(0);
   const pollRef = useRef<number | null>(null);
-  const remoteMutedRef = useRef(true);
 
   const fallbackProduct = getActiveSkuDisplay(
     backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
@@ -141,7 +128,9 @@ export default function ViewerPage() {
     Boolean(activeFlashSale) &&
     flashSaleSecondsLeft > 0 &&
     (activeFlashSale?.remaining_stock ?? 0) > 0;
-  const backendViewerComments = backendState?.viewer_comments ?? [];
+  const liveRoomMessages = [...roomState.viewerMessages, ...roomState.replies].sort(
+    (firstMessage, secondMessage) => firstMessage.createdAt - secondMessage.createdAt,
+  );
   function getPurchasableQuantityForSku(skuId: string | null) {
     const sku = backendState?.skus.find((stateSku) => stateSku.id === skuId);
     if (!sku) {
@@ -198,21 +187,46 @@ export default function ViewerPage() {
     peerRef.current = null;
     sessionIdRef.current = null;
     hostCandidateCountRef.current = 0;
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.srcObject = null;
-    }
   }, []);
 
   const connectToLatestStream = useCallback(async () => {
-    closeViewerPeer();
+    if (!viewerSession) {
+      return;
+    }
+    if (peerRef.current) {
+      return;
+    }
 
     setConnectionStatus("connecting");
     setStreamError("");
 
     try {
       const session = await fetchLatestMediaSession();
-      if (!session.offer || session.status === "stopped") {
+      if (session.status === "stopped") {
         setConnectionStatus("offline");
+        return;
+      }
+
+      await joinMediaSession(session.session_id, viewerSession.id);
+      let viewerOffer = session.viewer_offers?.[viewerSession.id] ?? null;
+      if (!viewerOffer) {
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          const latest = await fetchMediaSession(session.session_id);
+          if (latest.status === "stopped") {
+            setConnectionStatus("offline");
+            return;
+          }
+          viewerOffer = latest.viewer_offers?.[viewerSession.id] ?? null;
+          if (viewerOffer) {
+            break;
+          }
+        }
+      }
+
+      if (!viewerOffer) {
+        setConnectionStatus("offline");
+        setStreamError("Host has not prepared a viewer stream yet. Tap Connect again.");
         return;
       }
 
@@ -226,19 +240,14 @@ export default function ViewerPage() {
       peer.ontrack = (event) => {
         const [stream] = event.streams;
         if (remoteVideoRef.current && stream) {
-          const video = remoteVideoRef.current;
-          video.srcObject = stream;
-          video.muted = remoteMutedRef.current;
-          video.play().catch(() => {
-            setStreamError("Tap Connect to allow video playback in this browser.");
-          });
+          remoteVideoRef.current.srcObject = stream;
           setConnectionStatus("live");
         }
       };
       peer.onconnectionstatechange = () => {
         if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
           setConnectionStatus("offline");
-          closeViewerPeer();
+          peerRef.current = null;
         }
       };
       peer.onicecandidate = (event) => {
@@ -247,31 +256,41 @@ export default function ViewerPage() {
             sessionIdRef.current,
             "viewer",
             event.candidate.toJSON(),
+            viewerSession.id,
           );
         }
       };
 
-      await peer.setRemoteDescription(session.offer);
+      await peer.setRemoteDescription(viewerOffer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      await postMediaAnswer(session.session_id, answer);
+      await postMediaAnswer(session.session_id, answer, viewerSession.id);
 
       pollRef.current = window.setInterval(async () => {
-        if (!sessionIdRef.current || !peerRef.current) {
-          return;
-        }
-        const latest = await fetchMediaSession(sessionIdRef.current);
-        if (latest.status === "stopped") {
+        try {
+          if (!sessionIdRef.current || !peerRef.current) {
+            return;
+          }
+          const latest = await fetchMediaSession(sessionIdRef.current);
+          if (latest.status === "stopped") {
+            closeViewerPeer();
+            setConnectionStatus("offline");
+            return;
+          }
+          const hostCandidates =
+            latest.viewer_host_candidates?.[viewerSession.id] ?? [];
+          const newCandidates = hostCandidates.slice(
+            hostCandidateCountRef.current,
+          );
+          hostCandidateCountRef.current = hostCandidates.length;
+          for (const candidate of newCandidates) {
+            await peerRef.current.addIceCandidate(candidate);
+          }
+        } catch {
           closeViewerPeer();
           setConnectionStatus("offline");
+          setStreamError("Host stream session ended. Waiting for a new stream.");
           return;
-        }
-        const newCandidates = latest.host_candidates.slice(
-          hostCandidateCountRef.current,
-        );
-        hostCandidateCountRef.current = latest.host_candidates.length;
-        for (const candidate of newCandidates) {
-          await peerRef.current.addIceCandidate(candidate);
         }
       }, 1000);
     } catch (error) {
@@ -283,9 +302,13 @@ export default function ViewerPage() {
           : "Unable to connect to host stream.",
       );
     }
-  }, [closeViewerPeer]);
+  }, [closeViewerPeer, viewerSession]);
 
   useEffect(() => {
+    if (!viewerSession) {
+      return;
+    }
+
     function syncRoomState() {
       setRoomState(readLocalRoomState());
     }
@@ -316,21 +339,27 @@ export default function ViewerPage() {
       }
       closeViewerPeer();
     };
-  }, [closeViewerPeer, connectToLatestStream, syncBackendState]);
+  }, [closeViewerPeer, connectToLatestStream, syncBackendState, viewerSession]);
 
-  function toggleRemoteAudio() {
-    const nextMuted = !remoteMuted;
-    setRemoteMuted(nextMuted);
-    remoteMutedRef.current = nextMuted;
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.muted = nextMuted;
-      if (!nextMuted) {
-        remoteVideoRef.current.play().catch(() => {
-          setStreamError("Browser blocked audio playback. Try Connect again.");
-        });
-      }
+  useEffect(() => {
+    if (!viewerSession || !backendState) {
+      return;
     }
-  }
+    const sessionStillActive = backendState.viewer_sessions.some(
+      (session) => session.id === viewerSession.id,
+    );
+    if (!sessionStillActive) {
+      setViewerSession(null);
+      closeViewerPeer();
+    }
+  }, [backendState, closeViewerPeer, viewerSession]);
+
+  useEffect(() => {
+    chatListRef.current?.scrollTo({
+      top: chatListRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [roomState.updatedAt, messageStatus]);
 
   async function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -341,17 +370,33 @@ export default function ViewerPage() {
       return;
     }
 
+    if (!viewerSession) {
+      setMessageError("Please log in before chatting.");
+      return;
+    }
+
+    appendViewerMessage(trimmedMessage, viewerSession.username);
+    setRoomState(readLocalRoomState());
+    setMessageInput("");
     setMessageStatus("sending");
+    setMessageError("");
+
     try {
       const response = await sendViewerMessage(
         trimmedMessage,
-        getViewerIdentity(),
+        viewerSession.username,
       );
       setBackendState(response.state);
-      setMessageInput("");
+      if (response.suggested_reply) {
+        appendAgentReply(response.suggested_reply);
+        setRoomState(readLocalRoomState());
+      }
+    } catch (error) {
+      setMessageError(
+        error instanceof Error ? error.message : "Viewer message failed.",
+      );
+    } finally {
       setMessageStatus("idle");
-    } catch {
-      setMessageStatus("failed");
     }
   }
 
@@ -362,7 +407,7 @@ export default function ViewerPage() {
   }
 
   async function handleStartCheckout() {
-    if (!backendActiveSkuId || purchasableQuantity < 1) {
+    if (!viewerSession || !backendActiveSkuId || purchasableQuantity < 1) {
       return;
     }
 
@@ -372,7 +417,7 @@ export default function ViewerPage() {
       const response = await startCheckoutIntent(
         backendActiveSkuId,
         cappedPurchaseQuantity,
-        getViewerIdentity(),
+        viewerSession.username,
       );
       setBackendState(response.state);
       setCheckoutIntent(response.checkout_intent);
@@ -427,18 +472,95 @@ export default function ViewerPage() {
     }
   }
 
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const username = loginInput.trim();
+    if (!username) {
+      setLoginError("Username is required.");
+      return;
+    }
+
+    setLoginStatus("submitting");
+    setLoginError("");
+    try {
+      const response = await loginViewer(username);
+      setViewerSession(response.session);
+      setBackendState(response.state);
+      setLoginInput("");
+    } catch (error) {
+      setLoginError(
+        error instanceof Error ? error.message : "Viewer login failed.",
+      );
+    } finally {
+      setLoginStatus("idle");
+    }
+  }
+
+  async function handleLogout() {
+    if (!viewerSession) {
+      return;
+    }
+
+    const sessionId = viewerSession.id;
+    setViewerSession(null);
+    closeViewerPeer();
+    try {
+      await logoutViewer(sessionId);
+    } catch {
+      // The local session is already cleared; backend reset may have removed it.
+    }
+  }
+
+  if (!viewerSession) {
+    return (
+      <main className="flex min-h-dvh items-center justify-center bg-[#f7f8fa] px-4">
+        <form
+          className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+          onSubmit={handleLogin}
+        >
+          <p className="text-xs font-semibold uppercase tracking-wide text-teal-700">
+            LiveCrew Viewer
+          </p>
+          <h1 className="mt-2 text-xl font-semibold text-slate-950">
+            Enter the live room
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Use a unique username for this demo room.
+          </p>
+          <label className="mt-5 block text-sm font-semibold text-slate-900">
+            Username
+            <input
+              className="mt-2 min-h-11 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none transition focus:border-teal-500 focus:bg-white"
+              disabled={loginStatus === "submitting"}
+              onChange={(event) => setLoginInput(event.target.value)}
+              placeholder="alice"
+              value={loginInput}
+            />
+          </label>
+          {loginError ? (
+            <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
+              {loginError}
+            </p>
+          ) : null}
+          <button
+            className="mt-4 min-h-11 w-full rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+            disabled={loginStatus === "submitting"}
+            type="submit"
+          >
+            {loginStatus === "submitting" ? "Entering" : "Enter room"}
+          </button>
+        </form>
+      </main>
+    );
+  }
+
   return (
-    <AppShell
-      eyebrow="Viewer"
-      title="Customer livestream room"
-      description={`Python backend: ${getBackendUrl()}`}
-    >
-      <div className="mx-auto flex h-[calc(100dvh-11rem)] max-h-[860px] w-full max-w-[430px] flex-col overflow-hidden rounded-lg border border-slate-300 bg-slate-950 shadow-sm">
+    <main className="flex min-h-dvh bg-[#f7f8fa] p-3 sm:items-center sm:justify-center">
+      <div className="mx-auto flex h-[calc(100dvh-1.5rem)] max-h-[860px] w-full max-w-[430px] flex-col overflow-hidden rounded-lg border border-slate-300 bg-slate-950 shadow-sm sm:rounded-[2rem]">
         <section className="relative flex-[2] overflow-hidden bg-slate-950">
           <video
             autoPlay
             className="absolute inset-0 h-full w-full object-cover"
-            muted={remoteMuted}
             playsInline
             ref={remoteVideoRef}
           />
@@ -446,7 +568,7 @@ export default function ViewerPage() {
           <div className="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/65 to-transparent px-4 py-3 text-white">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-white/70">
-                LiveCrew
+                {viewerSession.username}
               </p>
               <p className="text-sm font-semibold">Customer live room</p>
             </div>
@@ -459,6 +581,13 @@ export default function ViewerPage() {
               <span className="text-xs font-medium capitalize">
                 {connectionStatus}
               </span>
+              <button
+                className="rounded-md border border-white/20 px-2 py-1 text-xs font-semibold text-white/85 transition hover:bg-white/10"
+                onClick={() => void handleLogout()}
+                type="button"
+              >
+                Logout
+              </button>
             </div>
           </div>
 
@@ -484,25 +613,6 @@ export default function ViewerPage() {
                   </p>
                 ) : null}
               </div>
-            </div>
-          ) : null}
-
-          {connectionStatus === "live" ? (
-            <div className="absolute right-3 top-16 flex gap-2">
-              <button
-                className="min-h-9 rounded-md border border-white/20 bg-black/55 px-3 text-xs font-semibold text-white backdrop-blur transition hover:bg-black/70"
-                onClick={toggleRemoteAudio}
-                type="button"
-              >
-                {remoteMuted ? "Unmute" : "Mute"}
-              </button>
-              <button
-                className="min-h-9 rounded-md border border-white/20 bg-black/55 px-3 text-xs font-semibold text-white backdrop-blur transition hover:bg-black/70"
-                onClick={() => void connectToLatestStream()}
-                type="button"
-              >
-                Reconnect
-              </button>
             </div>
           ) : null}
 
@@ -612,7 +722,10 @@ export default function ViewerPage() {
             <StatusPill tone="good">Synced</StatusPill>
           </div>
 
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
+          <div
+            className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3"
+            ref={chatListRef}
+          >
             {initialReplies.map((reply) => (
               <div
                 className={`max-w-[88%] rounded-md border px-3 py-2 ${
@@ -647,32 +760,34 @@ export default function ViewerPage() {
                 </p>
               </div>
             ))}
-            {roomState.replies.map((reply) => (
-              <div
-                className="max-w-[88%] rounded-md border border-teal-200 bg-teal-50 px-3 py-2"
-                key={reply.id}
-              >
-                <p className="text-xs font-semibold text-teal-700">
-                  {reply.name}
-                </p>
-                <p className="mt-1 text-sm leading-5 text-slate-800">
-                  {reply.text}
-                </p>
-              </div>
-            ))}
-            {[...backendViewerComments].reverse().map((chat) => (
-              <div
-                className="ml-auto max-w-[88%] rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                key={chat.id}
-              >
-                <p className="text-xs font-semibold text-slate-500">
-                  {chat.viewer}
-                </p>
-                <p className="mt-1 text-sm leading-5 text-slate-800">
-                  {chat.text}
-                </p>
-              </div>
-            ))}
+            {liveRoomMessages.map((message) => {
+              const isViewer = message.sender === "viewer";
+              const isAgent = message.sender === "agent";
+
+              return (
+                <div
+                  className={`max-w-[88%] rounded-md border px-3 py-2 ${
+                    isViewer
+                      ? "ml-auto border-slate-200 bg-slate-50"
+                      : isAgent
+                        ? "border-teal-200 bg-teal-50"
+                        : "border-slate-200 bg-white"
+                  }`}
+                  key={message.id}
+                >
+                  <p
+                    className={`text-xs font-semibold ${
+                      isAgent ? "text-teal-700" : "text-slate-500"
+                    }`}
+                  >
+                    {message.name}
+                  </p>
+                  <p className="mt-1 text-sm leading-5 text-slate-800">
+                    {message.text}
+                  </p>
+                </div>
+              );
+            })}
           </div>
 
           <form
@@ -690,16 +805,16 @@ export default function ViewerPage() {
               value={messageInput}
             />
             <button
-              className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800"
+              className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
               disabled={messageStatus === "sending"}
               type="submit"
             >
               {messageStatus === "sending" ? "Sending" : "Send"}
             </button>
           </form>
-          {messageStatus === "failed" ? (
-            <p className="border-t border-amber-100 bg-amber-50 px-4 py-2 text-xs leading-5 text-amber-800">
-              Backend chat is unavailable. Start FastAPI on port 8000 and try again.
+          {messageError ? (
+            <p className="border-t border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+              {messageError}
             </p>
           ) : null}
         </section>
@@ -748,7 +863,7 @@ export default function ViewerPage() {
                   {checkoutAvailableQuantity}
                 </dd>
               </div>
-              <div className="border-t border-slate-200 pt-3 flex justify-between gap-3">
+              <div className="flex justify-between gap-3 border-t border-slate-200 pt-3">
                 <dt className="text-slate-700">Total</dt>
                 <dd className="text-base font-bold text-slate-950">
                   {formatPrice(checkoutIntent.total_price_cents)}
@@ -784,6 +899,6 @@ export default function ViewerPage() {
           </div>
         </div>
       ) : null}
-    </AppShell>
+    </main>
   );
 }
