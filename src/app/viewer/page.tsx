@@ -45,14 +45,20 @@ const initialReplies: RoomReply[] = [
   },
 ];
 
-const flashSale = {
-  sold: 12,
-  total: 20,
-  secondsLeft: 90,
-};
-
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
+}
+
+function getFlashSaleSecondsLeft(
+  flashSale: NonNullable<BackendState["flash_sale"]>,
+  now: number,
+) {
+  const createdAt = new Date(flashSale.created_at).getTime();
+  if (Number.isNaN(createdAt)) {
+    return flashSale.duration_seconds;
+  }
+  const endsAt = createdAt + flashSale.duration_seconds * 1000;
+  return Math.max(0, Math.ceil((endsAt - now) / 1000));
 }
 
 export default function ViewerPage() {
@@ -64,6 +70,7 @@ export default function ViewerPage() {
   >("offline");
   const [streamError, setStreamError] = useState("");
   const [backendState, setBackendState] = useState<BackendState | null>(null);
+  const [now, setNow] = useState(() => Date.now());
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
@@ -74,8 +81,9 @@ export default function ViewerPage() {
   const fallbackProduct = getActiveSkuDisplay(
     backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
   );
+  const backendActiveSkuId = backendState?.active_sku_id ?? null;
   const activeBackendSku = backendState?.skus.find(
-    (sku) => sku.id === backendState.active_sku_id,
+    (sku) => sku.id === backendActiveSkuId,
   );
   const displayProduct = {
     name: activeBackendSku?.name ?? fallbackProduct.name,
@@ -85,6 +93,17 @@ export default function ViewerPage() {
     stock: activeBackendSku?.stock ?? fallbackProduct.stock,
     facts: activeBackendSku?.facts ?? fallbackProduct.facts,
   };
+  const activeFlashSale =
+    backendState?.flash_sale?.sku_id === backendActiveSkuId
+      ? backendState.flash_sale
+      : null;
+  const flashSaleSecondsLeft = activeFlashSale
+    ? getFlashSaleSecondsLeft(activeFlashSale, now)
+    : 0;
+  const isFlashSaleActive =
+    Boolean(activeFlashSale) &&
+    flashSaleSecondsLeft > 0 &&
+    (activeFlashSale?.remaining_stock ?? 0) > 0;
 
   const syncBackendState = useCallback(async () => {
     try {
@@ -192,11 +211,15 @@ export default function ViewerPage() {
         void connectToLatestStream();
       }
     }, 3000);
+    const clockId = window.setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
 
     return () => {
       unsubscribe();
       window.clearTimeout(initialSyncId);
       window.clearInterval(reconnectId);
+      window.clearInterval(clockId);
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
       }
@@ -283,9 +306,20 @@ export default function ViewerPage() {
                 <p className="truncate text-base font-semibold text-slate-950">
                   {displayProduct.name}
                 </p>
-                <p className="mt-1 text-sm font-semibold text-teal-800">
-                  {displayProduct.price}
-                </p>
+                {isFlashSaleActive && activeFlashSale ? (
+                  <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <p className="text-lg font-bold text-rose-700">
+                      {formatPrice(activeFlashSale.sale_price_cents)}
+                    </p>
+                    <p className="text-xs font-medium text-slate-500 line-through">
+                      {displayProduct.price}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-sm font-semibold text-teal-800">
+                    {displayProduct.price}
+                  </p>
+                )}
               </div>
               <span className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
                 {displayProduct.stock} left
@@ -294,14 +328,26 @@ export default function ViewerPage() {
             <p className="mt-2 max-h-10 overflow-hidden text-sm leading-5 text-slate-700">
               {displayProduct.facts.slice(0, 2).join(". ")}
             </p>
-            <div className="mt-3 flex items-center justify-between rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
-              <p className="text-xs font-semibold text-amber-900">
-                Limited offer
-              </p>
-              <p className="text-xs text-amber-800">
-                {flashSale.sold}/{flashSale.total} left · {flashSale.secondsLeft}s
-              </p>
-            </div>
+            {isFlashSaleActive && activeFlashSale ? (
+              <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase text-rose-900">
+                    Flash sale
+                  </p>
+                  <p className="mt-0.5 truncate text-xs text-rose-700">
+                    {activeFlashSale.remaining_stock}/{activeFlashSale.stock_limit} left
+                  </p>
+                </div>
+                <div className="min-w-20 rounded-md bg-rose-700 px-3 py-1.5 text-center text-white shadow-sm">
+                  <p className="text-[10px] font-semibold uppercase leading-none text-white/75">
+                    Ends in
+                  </p>
+                  <p className="mt-1 font-mono text-xl font-bold leading-none">
+                    {flashSaleSecondsLeft}s
+                  </p>
+                </div>
+              </div>
+            ) : null}
           </div>
         </section>
 

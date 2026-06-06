@@ -415,24 +415,29 @@ Examples:
 "First 10 orders for the serum are 19 dollars."
 -> Create a quantity-limited flash sale for GlowFix Vitamin C Serum.
 
+"设置Vitamin C促销，限时3min，限价10元，限量10个"
+-> Use LLM intent extraction to create a flash sale for GlowFix Vitamin C Serum: three minutes, 10 units, $10.
+
 "Cancel the flash deal."
 -> Cancel the active flash sale.
 ```
 
 Expected behavior:
 
-- CoHostAgent uses the OpenAI API to extract SKU, promotional price, duration, and stock limit.
+- CoHostAgent uses the OpenAI API to extract SKU, promotional price, duration, and stock limit from natural host language, including multilingual and mixed-language phrasing.
 - If no SKU is mentioned, the promotion applies to the active SKU.
 - The backend validates that the promotional price and quantity limit are allowed.
-- The frontend should show the active flash-sale state, including price, remaining quantity, and expiry.
+- The frontend should show the active flash-sale state, including price, remaining quantity, and a prominent countdown timer.
 - Orders should use flash-sale price only when the sale is active, unexpired, and has enough remaining promotional stock.
 - Flash-sale events should be recorded for post-stream reporting.
+- If OpenAI is unavailable, times out, or returns invalid structured output, the backend may use deterministic fallback parsing or request host confirmation, but it should not execute an unvalidated promotion.
 
 Acceptance criteria:
 
 - Spoken promotion setup produces a `create_flash_sale` proposed action.
+- Mixed-language promotion setup produces the same structured action fields as English setup when OpenAI extraction is available.
 - Approved promotions update backend `flash_sale` state.
-- The viewer room displays flash-sale price and remaining stock.
+- The viewer room displays flash-sale price, remaining stock, and a prominent countdown timer.
 - Orders reduce both SKU stock and flash-sale remaining stock when applicable.
 - Cancelled or expired promotions no longer affect order price.
 

@@ -276,11 +276,16 @@ Examples:
 "For the next five minutes, first 20 buyers get it at 18.8."
 -> create_flash_sale for active SKU
 
+"设置Vitamin C促销，限时3min，限价10元，限量10个"
+-> set_active_sku for GlowFix Vitamin C Serum
+-> create_flash_sale for GlowFix Vitamin C Serum
+
 "Cancel the flash deal."
 -> cancel_flash_sale
 ```
 
 Host transcript processing should support one proposed action or multiple proposed actions in a single utterance.
+CoHostAgent should use OpenAI structured output for primary host intent extraction and return proposed actions in utterance order. Deterministic parsing remains a fallback when OpenAI is unavailable, times out, or returns invalid structured output; fallback output still passes through the same guardrails and commerce service.
 
 Example:
 
@@ -440,6 +445,7 @@ Responsibilities:
 
 - Understand host operating intent from natural transcript.
 - Split a transcript into one or more proposed actions.
+- Use OpenAI structured output as the primary extraction path for host operations, including multilingual and mixed-language phrasing.
 - Resolve explicit product mentions using shared SKU tools.
 - Use active SKU only for contextual references like "this one" or "the current product".
 - Propose product listing, price, flash-sale, announcement, and override actions.
