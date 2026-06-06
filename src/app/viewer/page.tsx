@@ -1,8 +1,9 @@
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
-import { mockChat, mockProducts } from "@/lib/mock-data";
+import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
+import { mockChat } from "@/lib/mock-data";
 
 export default function ViewerPage() {
-  const activeProduct = mockProducts[0];
+  const activeProduct = getActiveSkuDisplay(defaultActiveSkuId);
 
   return (
     <AppShell
