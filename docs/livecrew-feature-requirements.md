@@ -731,6 +731,7 @@ The frontend should include:
 - On desktop, Monitor Agent and CoHost Agent Event Timeline should sit side by side with matching width and height.
 - When the timeline is moved beside Monitor Agent, the host cockpit should use a wider desktop canvas instead of shrinking the existing module widths.
 - On desktop, the camera/microphone panel, CoHost Agent queue group, and ledger panel should share a clean lower alignment, with the live transcript expanding to fill available space.
+- Monitor Agent KPI labels should include short operator-facing explanations, and the host Monitor panel should refresh from live metrics so order activity and viewer intent do not leave stale hesitation labels or empty top-intent summaries.
 - Viewer room styled as a mobile livestream commerce room.
 - The viewer route should present the mobile livestream frame directly, without the shared dashboard header above it.
 - Viewer livestream area occupying the top two-thirds of the mobile room.

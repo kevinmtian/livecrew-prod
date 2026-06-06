@@ -55,12 +55,13 @@ class LiveMetricsStore:
         event_type: str,
         text: str | None = None,
     ) -> MonitorSignalRequest:
+        text_event = event_type in {"message", "order"} and bool(text)
         sentiment_score = (
-            self._score_sentiment_with_openai(text) if event_type == "message" and text else None
+            self._score_sentiment_with_openai(text) if text_event and text else None
         )
         intent_analysis = (
-            self._classify_viewer_intent_with_openai(text)
-            if event_type == "message" and text
+            self._classify_viewer_intent_with_openai(text, event_type)
+            if text_event and text
             else None
         )
         with self._lock:
@@ -68,9 +69,9 @@ class LiveMetricsStore:
             self._viewer_seen_at[session_id] = now
             if event_type in {"message", "like"}:
                 self._interaction_events.append(now)
-            if event_type == "message" and sentiment_score is not None:
+            if text_event and sentiment_score is not None:
                 self._sentiment_events.append((now, sentiment_score))
-            if event_type == "message" and intent_analysis is not None:
+            if text_event and intent_analysis is not None:
                 self._intent_events.append(
                     (
                         now,
@@ -199,7 +200,18 @@ class LiveMetricsStore:
         return question, count
 
     @staticmethod
-    def _classify_viewer_intent_with_openai(text: str) -> ViewerIntentAnalysis:
+    def _classify_viewer_intent_with_openai(
+        text: str,
+        event_type: str = "message",
+    ) -> ViewerIntentAnalysis:
+        if event_type == "order":
+            return ViewerIntentAnalysis(
+                intent="purchase_intent",
+                high_intent=True,
+                normalized_question="checkout order",
+                reason="Viewer checkout event.",
+            )
+
         client = get_openai_client()
         if client is None:
             return LiveMetricsStore._classify_viewer_intent_with_rules(text)

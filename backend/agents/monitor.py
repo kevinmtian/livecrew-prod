@@ -160,7 +160,20 @@ def _meaningful_tokens(text: str) -> set[str]:
 
 
 def _analyze_with_rules(signal: MonitorSignalRequest) -> tuple[MonitorScenario, MonitorHook]:
-    if signal.online_viewers_delta >= 12 and signal.conversion_rate < 1:
+    purchase_intent_count = signal.intent_distribution.get("purchase_intent", 0)
+    if signal.gpm_cents > 0 or signal.conversion_rate > 0 or purchase_intent_count > 0:
+        scenario = MonitorScenario(
+            id="spike_push",
+            label="Order momentum",
+            reason="Recent orders or purchase intent are visible; reinforce checkout and inventory while momentum is active.",
+            urgency="high" if signal.gpm_delta >= 15 or signal.high_intent_density >= 1 else "medium",
+        )
+        hook = MonitorHook(
+            id="order_push",
+            label="Order push",
+            script="Orders are coming in now. If you want this item, use the product card and check out while the current stock is still available.",
+        )
+    elif signal.online_viewers_delta >= 12 and signal.conversion_rate < 1:
         scenario = MonitorScenario(
             id="hesitation",
             label="Hesitation spike",

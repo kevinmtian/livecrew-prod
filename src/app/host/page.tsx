@@ -176,6 +176,55 @@ function splitTopChatIntents(value: string | undefined) {
     .slice(0, 3);
 }
 
+function topChatIntentsFromMetrics(metrics: MonitorSignalPayload | null) {
+  if (!metrics?.intent_distribution) {
+    return [];
+  }
+
+  return Object.entries(metrics.intent_distribution)
+    .filter(([, count]) => count > 0)
+    .sort((first, second) => second[1] - first[1])
+    .slice(0, 3)
+    .map(([intent, count], index) => `Top${index + 1} ${intent.replaceAll("_", " ")} (${count})`);
+}
+
+function summarizeLiveMonitor(metrics: MonitorSignalPayload | null) {
+  if (!metrics) {
+    return null;
+  }
+
+  const purchaseIntentCount = metrics.intent_distribution?.purchase_intent ?? 0;
+  if (
+    metrics.gpm_cents > 0 ||
+    metrics.conversion_rate > 0 ||
+    purchaseIntentCount > 0
+  ) {
+    return {
+      scenarioLabel: "Order momentum",
+      hookLabel: "Order push",
+      urgency: "high" as const,
+      reason:
+        "Live orders or purchase intent are visible in the last minute; keep checkout and inventory cues clear.",
+      script:
+        "Orders are coming in now. If you want this item, use the product card and check out while the current stock is still available.",
+      hostCue:
+        "Viewer purchase activity is active. Reinforce the buying path and current inventory.",
+    };
+  }
+
+  return null;
+}
+
+const monitorMetricHelp: Record<string, string> = {
+  Viewers: "Active viewers seen recently.",
+  GPM: "Gross merchandise value from recent backend orders.",
+  Conversion: "Recent orders divided by active viewers.",
+  "High intent": "Buying-intent chat or order events per minute.",
+  Backlog: "Most repeated product or buying question.",
+  Interaction: "Recent chat and like activity per active viewer.",
+  Source: "Whether Monitor used rules or OpenAI.",
+};
+
 function formatHostLiveMetric(
   metrics: MonitorSignalPayload | null,
   key:
@@ -1091,6 +1140,25 @@ export default function HostPage() {
     backendStatus,
     streamStatus,
   });
+  const liveMonitorSummary = summarizeLiveMonitor(hostLiveMetrics);
+  const monitorDisplay = liveMonitorSummary
+    ? {
+        scenarioLabel: liveMonitorSummary.scenarioLabel,
+        scenarioReason: liveMonitorSummary.reason,
+        urgency: liveMonitorSummary.urgency,
+        hookLabel: liveMonitorSummary.hookLabel,
+        hostCue: liveMonitorSummary.hostCue,
+        script: liveMonitorSummary.script,
+        signals: roomState.monitorSignal?.signals ?? {},
+      }
+    : roomState.monitorSignal;
+  const monitorTopIntents =
+    topChatIntentsFromMetrics(hostLiveMetrics).length > 0
+      ? topChatIntentsFromMetrics(hostLiveMetrics)
+      : splitTopChatIntents(
+          monitorDisplay?.signals.top_chat_intents ??
+            monitorDisplay?.signals.top_chat_intent,
+        );
 
   function closeViewerPeers() {
     viewerPeersRef.current.forEach((peer) => peer.close());
@@ -2300,17 +2368,14 @@ export default function HostPage() {
             className="xl:min-h-0 xl:flex xl:flex-col"
             contentClassName="xl:flex xl:flex-1"
           >
-            {roomState.monitorSignal ? (
+            {monitorDisplay ? (
               <div className="w-full rounded-md border border-rose-100 bg-rose-50 p-4">
                 <div className="mb-3 rounded-md border border-white/80 bg-white/80 p-3">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                     Top chat intents
                   </p>
                   <div className="mt-2 grid gap-2">
-                    {splitTopChatIntents(
-                      roomState.monitorSignal.signals.top_chat_intents ??
-                        roomState.monitorSignal.signals.top_chat_intent,
-                    ).map((intent) => (
+                    {monitorTopIntents.map((intent) => (
                       <div
                         className="rounded-md bg-slate-50 px-3 py-2 text-sm font-semibold leading-5 text-slate-950"
                         key={intent}
@@ -2318,10 +2383,7 @@ export default function HostPage() {
                         {intent}
                       </div>
                     ))}
-                    {splitTopChatIntents(
-                      roomState.monitorSignal.signals.top_chat_intents ??
-                        roomState.monitorSignal.signals.top_chat_intent,
-                    ).length === 0 ? (
+                    {monitorTopIntents.length === 0 ? (
                       <p className="text-sm font-semibold text-slate-950">-</p>
                     ) : null}
                   </div>
@@ -2333,7 +2395,7 @@ export default function HostPage() {
                       formatHostLiveMetric(
                         hostLiveMetrics,
                         "online_viewers",
-                        roomState.monitorSignal.signals.online_viewers,
+                        monitorDisplay.signals.online_viewers,
                       ),
                     ],
                     [
@@ -2341,7 +2403,7 @@ export default function HostPage() {
                       formatHostLiveMetric(
                         hostLiveMetrics,
                         "gpm",
-                        roomState.monitorSignal.signals.gpm,
+                        monitorDisplay.signals.gpm,
                       ),
                     ],
                     [
@@ -2349,7 +2411,7 @@ export default function HostPage() {
                       formatHostLiveMetric(
                         hostLiveMetrics,
                         "conversion_rate",
-                        roomState.monitorSignal.signals.conversion_rate,
+                        monitorDisplay.signals.conversion_rate,
                       ),
                     ],
                     [
@@ -2357,7 +2419,7 @@ export default function HostPage() {
                       formatHostLiveMetric(
                         hostLiveMetrics,
                         "high_intent_density",
-                        roomState.monitorSignal.signals.high_intent_density,
+                        monitorDisplay.signals.high_intent_density,
                       ),
                     ],
                     [
@@ -2365,7 +2427,7 @@ export default function HostPage() {
                       formatHostLiveMetric(
                         hostLiveMetrics,
                         "question_backlog",
-                        roomState.monitorSignal.signals.question_backlog,
+                        monitorDisplay.signals.question_backlog,
                       ),
                     ],
                     [
@@ -2373,10 +2435,10 @@ export default function HostPage() {
                       formatHostLiveMetric(
                         hostLiveMetrics,
                         "interaction_rate",
-                        roomState.monitorSignal.signals.interaction_rate,
+                        monitorDisplay.signals.interaction_rate,
                       ),
                     ],
-                    ["Source", roomState.monitorSignal.signals.analysis_source],
+                    ["Source", liveMonitorSummary ? "live metrics" : monitorDisplay.signals.analysis_source],
                   ].map(([label, value]) => (
                     <div
                       className="min-h-16 rounded-md border border-white/70 bg-white/70 p-2"
@@ -2384,6 +2446,9 @@ export default function HostPage() {
                     >
                       <p className="text-[11px] font-semibold text-slate-500">
                         {label}
+                      </p>
+                      <p className="mt-0.5 text-[10px] leading-4 text-slate-500">
+                        {monitorMetricHelp[label] ?? "Live monitor metric."}
                       </p>
                       <p className="mt-1 break-words text-sm font-semibold text-slate-950">
                         {value ?? "-"}
@@ -2394,29 +2459,29 @@ export default function HostPage() {
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-sm font-semibold text-rose-700">
-                      {roomState.monitorSignal.scenarioLabel}
+                      {monitorDisplay.scenarioLabel}
                     </p>
                     <h2 className="mt-2 text-lg font-semibold text-slate-950">
-                      {roomState.monitorSignal.hookLabel}
+                      {monitorDisplay.hookLabel}
                     </h2>
                   </div>
                   <StatusPill
                     tone={
-                      roomState.monitorSignal.urgency === "high"
+                      monitorDisplay.urgency === "high"
                         ? "warning"
                         : "neutral"
                     }
                   >
-                    {roomState.monitorSignal.urgency}
+                    {monitorDisplay.urgency}
                   </StatusPill>
                 </div>
-                {roomState.monitorSignal.hostCue ? (
+                {monitorDisplay.hostCue ? (
                   <div className="mt-4 rounded-md border border-amber-100 bg-amber-50 p-3">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
                       Host Cue
                     </p>
                     <p className="mt-2 text-xs leading-5 text-slate-800">
-                      {roomState.monitorSignal.hostCue}
+                      {monitorDisplay.hostCue}
                     </p>
                   </div>
                 ) : null}
@@ -2425,11 +2490,11 @@ export default function HostPage() {
                     Suggested Line
                   </p>
                   <p className="mt-2 text-sm leading-6 text-slate-950">
-                    {roomState.monitorSignal.script}
+                    {monitorDisplay.script}
                   </p>
                 </div>
                 <p className="mt-3 text-xs leading-5 text-slate-600">
-                  {roomState.monitorSignal.scenarioReason}
+                  {monitorDisplay.scenarioReason}
                 </p>
               </div>
             ) : (
