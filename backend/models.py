@@ -138,6 +138,38 @@ class ViewerMessageRequest(BaseModel):
     text: str
 
 
+class MonitorSignalRequest(BaseModel):
+    online_viewers: int = Field(ge=0)
+    online_viewers_delta: float
+    gpm_cents: int = Field(ge=0)
+    gpm_delta: float
+    conversion_rate: float = Field(ge=0)
+    conversion_rate_delta: float
+    comment_sentiment: float = Field(ge=0, le=1)
+    interaction_rate: float = Field(ge=0)
+
+
+class MonitorScenario(BaseModel):
+    id: Literal["hesitation", "spike_push", "warm_retention", "cold_warning", "steady"]
+    label: str
+    reason: str
+    urgency: Literal["low", "medium", "high"]
+
+
+class MonitorHook(BaseModel):
+    id: Literal["suspense", "order_push", "benefit", "interaction"]
+    label: str
+    script: str
+
+
+class MonitorResponse(BaseModel):
+    agent: Literal["MonitorAgent"] = "MonitorAgent"
+    scenario: MonitorScenario
+    hook: MonitorHook
+    signals: dict[str, str]
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class TranscriptionResponse(BaseModel):
     text: str
     source: Literal["openai", "unavailable"]

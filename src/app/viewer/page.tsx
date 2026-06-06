@@ -114,6 +114,17 @@ export default function ViewerPage() {
     }
   }, []);
 
+  const closeViewerPeer = useCallback(() => {
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    peerRef.current?.close();
+    peerRef.current = null;
+    sessionIdRef.current = null;
+    hostCandidateCountRef.current = 0;
+  }, []);
+
   const connectToLatestStream = useCallback(async () => {
     if (peerRef.current) {
       return;
@@ -165,34 +176,40 @@ export default function ViewerPage() {
       await postMediaAnswer(session.session_id, answer);
 
       pollRef.current = window.setInterval(async () => {
-        if (!sessionIdRef.current || !peerRef.current) {
-          return;
-        }
-        const latest = await fetchMediaSession(sessionIdRef.current);
-        if (latest.status === "stopped") {
-          peerRef.current.close();
-          peerRef.current = null;
+        try {
+          if (!sessionIdRef.current || !peerRef.current) {
+            return;
+          }
+          const latest = await fetchMediaSession(sessionIdRef.current);
+          if (latest.status === "stopped") {
+            closeViewerPeer();
+            setConnectionStatus("offline");
+            return;
+          }
+          const newCandidates = latest.host_candidates.slice(
+            hostCandidateCountRef.current,
+          );
+          hostCandidateCountRef.current = latest.host_candidates.length;
+          for (const candidate of newCandidates) {
+            await peerRef.current.addIceCandidate(candidate);
+          }
+        } catch {
+          closeViewerPeer();
           setConnectionStatus("offline");
+          setStreamError("Host stream session ended. Waiting for a new stream.");
           return;
-        }
-        const newCandidates = latest.host_candidates.slice(
-          hostCandidateCountRef.current,
-        );
-        hostCandidateCountRef.current = latest.host_candidates.length;
-        for (const candidate of newCandidates) {
-          await peerRef.current.addIceCandidate(candidate);
         }
       }, 1000);
     } catch (error) {
       setConnectionStatus("offline");
-      peerRef.current = null;
+      closeViewerPeer();
       setStreamError(
         error instanceof Error
           ? error.message
           : "Unable to connect to host stream.",
       );
     }
-  }, []);
+  }, [closeViewerPeer]);
 
   useEffect(() => {
     function syncRoomState() {
@@ -223,9 +240,9 @@ export default function ViewerPage() {
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
       }
-      peerRef.current?.close();
+      closeViewerPeer();
     };
-  }, [connectToLatestStream, syncBackendState]);
+  }, [closeViewerPeer, connectToLatestStream, syncBackendState]);
 
   function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

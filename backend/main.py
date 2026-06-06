@@ -15,10 +15,13 @@ from backend.media_signaling import media_store
 from backend.models import (
     SessionCreateResponse,
     SignalPayload,
+    MonitorResponse,
+    MonitorSignalRequest,
     TextEventRequest,
     TranscriptionResponse,
     WorkflowResponse,
 )
+from backend.agents.monitor import analyze_monitor_signals
 from backend.openai_client import transcribe_audio_file
 from backend.state import commerce_store
 
@@ -106,6 +109,11 @@ def host_transcript(request: TextEventRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Transcript text is required.")
     return run_cohost_workflow(request.text.strip(), "speech_transcript")
+
+
+@app.post("/events/monitor-signal", response_model=MonitorResponse)
+def monitor_signal(request: MonitorSignalRequest):
+    return analyze_monitor_signals(request)
 
 
 @app.post("/events/transcribe-audio", response_model=TranscriptionResponse)

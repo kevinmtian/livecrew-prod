@@ -13,6 +13,11 @@ const routes = [
     description: "Preview the customer livestream experience with chat and product context.",
   },
   {
+    href: "/monitor",
+    title: "Monitor Agent",
+    description: "Detect livestream metric scenarios and generate host hooks.",
+  },
+  {
     href: "/agent_evaluation",
     title: "Agent Evaluation",
     description: "Inspect deterministic reliability checks for grounding and guardrails.",

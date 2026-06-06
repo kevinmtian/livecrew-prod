@@ -83,6 +83,34 @@ export type WorkflowResponse = {
   state: BackendState;
 };
 
+export type MonitorSignalPayload = {
+  online_viewers: number;
+  online_viewers_delta: number;
+  gpm_cents: number;
+  gpm_delta: number;
+  conversion_rate: number;
+  conversion_rate_delta: number;
+  comment_sentiment: number;
+  interaction_rate: number;
+};
+
+export type MonitorResponse = {
+  agent: "MonitorAgent";
+  scenario: {
+    id: "hesitation" | "spike_push" | "warm_retention" | "cold_warning" | "steady";
+    label: string;
+    reason: string;
+    urgency: "low" | "medium" | "high";
+  };
+  hook: {
+    id: "suspense" | "order_push" | "benefit" | "interaction";
+    label: string;
+    script: string;
+  };
+  signals: Record<string, string>;
+  created_at: string;
+};
+
 export type MediaSession = {
   session_id: string;
   status: "waiting" | "offer_ready" | "answer_ready" | "live" | "stopped";
@@ -141,6 +169,30 @@ export function approvePendingAction(pendingActionId: string) {
   return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/approve`, {
     method: "POST",
   });
+}
+
+export function sendMonitorSignal(payload: MonitorSignalPayload) {
+  return requestJson<MonitorResponse>("/events/monitor-signal", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function transcribeAudio(blob: Blob) {
+  const formData = new FormData();
+  formData.append("file", blob, "host-audio.webm");
+
+  const response = await fetch(`${getBackendUrl()}/events/transcribe-audio`, {
+    method: "POST",
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Transcription failed with ${response.status}`);
+  }
+
+  return response.json() as Promise<{ text: string; source: string }>;
 }
 
 export function rejectPendingAction(pendingActionId: string) {

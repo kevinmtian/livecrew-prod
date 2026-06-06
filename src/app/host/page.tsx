@@ -964,6 +964,64 @@ export default function HostPage() {
         </div>
 
         <div className="grid gap-4">
+          <Panel title="Monitor Agent" eyebrow="Scene judgment">
+            {roomState.monitorSignal ? (
+              <div className="rounded-md border border-rose-100 bg-rose-50 p-4">
+                <div className="mb-4 grid grid-cols-2 gap-2">
+                  {[
+                    ["在线人数", roomState.monitorSignal.signals.online_viewers],
+                    ["GPM", roomState.monitorSignal.signals.gpm],
+                    ["转化率", roomState.monitorSignal.signals.conversion_rate],
+                    ["弹幕情绪", roomState.monitorSignal.signals.comment_sentiment],
+                    ["互动率", roomState.monitorSignal.signals.interaction_rate],
+                    ["来源", roomState.monitorSignal.signals.analysis_source],
+                  ].map(([label, value]) => (
+                    <div
+                      className="min-h-16 rounded-md border border-white/70 bg-white/70 p-2"
+                      key={label}
+                    >
+                      <p className="text-[11px] font-semibold text-slate-500">
+                        {label}
+                      </p>
+                      <p className="mt-1 break-words text-sm font-semibold text-slate-950">
+                        {value ?? "-"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-rose-700">
+                      {roomState.monitorSignal.scenarioLabel}
+                    </p>
+                    <h2 className="mt-2 text-lg font-semibold text-slate-950">
+                      {roomState.monitorSignal.hookLabel}
+                    </h2>
+                  </div>
+                  <StatusPill
+                    tone={
+                      roomState.monitorSignal.urgency === "high"
+                        ? "warning"
+                        : "neutral"
+                    }
+                  >
+                    {roomState.monitorSignal.urgency}
+                  </StatusPill>
+                </div>
+                <p className="mt-4 rounded-md bg-white p-3 text-sm leading-6 text-slate-950">
+                  {roomState.monitorSignal.script}
+                </p>
+                <p className="mt-3 text-xs leading-5 text-slate-600">
+                  {roomState.monitorSignal.scenarioReason}
+                </p>
+              </div>
+            ) : (
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+                Open Monitor and click a scenario to push judgment and script here.
+              </div>
+            )}
+          </Panel>
+
           <Panel title="Agent Event Timeline" eyebrow="Ledger">
             <div className="space-y-3">
               {ledgerEvents.map((event) => {
