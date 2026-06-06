@@ -27,6 +27,11 @@ export type BackendOrder = {
   created_at: string;
 };
 
+export type BackendOrderResponse = {
+  order: BackendOrder;
+  state: BackendCommerceState;
+};
+
 export type BackendAnnouncement = {
   id: string;
   message: string;
@@ -114,6 +119,17 @@ export function createBackendFlashSale(skuId: SkuId, salePrice: number) {
       sale_price: salePrice,
       quantity: 20,
       ends_in_seconds: 90,
+    }),
+  });
+}
+
+export function placeBackendOrder(skuId: SkuId, qty: number, viewer: string) {
+  return requestBackend<BackendOrderResponse>("/live/order", {
+    method: "POST",
+    body: JSON.stringify({
+      sku_id: skuId,
+      qty,
+      viewer,
     }),
   });
 }

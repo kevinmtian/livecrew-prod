@@ -2,6 +2,10 @@
 
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
 import {
+  deterministicAnalyzeViewerMessage,
+  type ViewerMessageAnalysis,
+} from "@/lib/agent-analyzer";
+import {
   type BackendCommerceState,
   createBackendFlashSale,
   fetchBackendState,
@@ -11,6 +15,7 @@ import {
   getBackendSkuName,
   groupOrdersBySku,
   listBackendProduct,
+  placeBackendOrder,
   resetBackendCommerce,
 } from "@/lib/backend-commerce";
 import {
@@ -21,6 +26,7 @@ import {
   resolveSkuFromText,
 } from "@/lib/catalogue";
 import {
+  appendAgentReply,
   appendHostReply,
   defaultLocalRoomState,
   type LocalRoomState,
@@ -30,7 +36,14 @@ import {
   subscribeToLocalRoom,
 } from "@/lib/local-room";
 import { mockChat } from "@/lib/mock-data";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type LedgerEvent = {
   id: string;
@@ -44,6 +57,16 @@ type QueueItem = {
   title: string;
   detail: string;
   status: "Draft" | "Review" | "Blocked";
+  analysis?: Pick<
+    ViewerMessageAnalysis,
+    | "intent"
+    | "decision"
+    | "risk"
+    | "confidence"
+    | "skuId"
+    | "orderQuantity"
+    | "reason"
+  >;
 };
 
 const initialTranscript =
@@ -150,6 +173,7 @@ const initialLedger: LedgerEvent[] = [
 ];
 
 export default function HostPage() {
+  const processedMessageIds = useRef(new Set<string>());
   const [transcript, setTranscript] = useState(initialTranscript);
   const [activeSkuId, setActiveSkuId] = useState<SkuId>(defaultActiveSkuId);
   const [scriptIndex, setScriptIndex] = useState(0);
@@ -239,6 +263,197 @@ export default function HostPage() {
     };
   }, []);
 
+  const appendQueueStatus = useCallback((item: QueueItem) => {
+    setQueueItems((currentItems) => [item, ...currentItems]);
+  }, []);
+
+  const processOrderMessage = useCallback(
+    async (
+      messageId: string,
+      viewerName: string,
+      analysis: ViewerMessageAnalysis,
+    ) => {
+      if (!analysis.skuId || !analysis.orderQuantity) {
+        appendQueueStatus({
+          id: `queue-order-clarify-${messageId}`,
+          title: "Order needs host review",
+          detail:
+            "Order intent was detected, but SKU or quantity is unresolved.",
+          status: "Review",
+          analysis: {
+            intent: analysis.intent,
+            decision: "clarify",
+            risk: analysis.risk,
+            confidence: analysis.confidence,
+            skuId: analysis.skuId,
+            orderQuantity: analysis.orderQuantity,
+            reason: analysis.reason,
+          },
+        });
+        return;
+      }
+
+      try {
+        const state = backendState ?? (await fetchBackendState());
+        const skuState = state.skus[analysis.skuId];
+
+        if (!skuState || skuState.stock < analysis.orderQuantity) {
+          appendQueueStatus({
+            id: `queue-order-blocked-${messageId}`,
+            title: "Order blocked",
+            detail: `${analysis.sku?.name ?? analysis.skuId} has ${
+              skuState?.stock ?? 0
+            } in stock, requested ${analysis.orderQuantity}.`,
+            status: "Blocked",
+            analysis: {
+              intent: analysis.intent,
+              decision: "block",
+              risk: "medium",
+              confidence: analysis.confidence,
+              skuId: analysis.skuId,
+              orderQuantity: analysis.orderQuantity,
+              reason: "Insufficient backend stock for requested order.",
+            },
+          });
+          appendAgentReply(
+            `${analysis.sku?.name ?? "This product"} does not have enough stock for ${analysis.orderQuantity} units. The host has been notified.`,
+          );
+          setRoomState(readLocalRoomState());
+          setLedgerEvents((currentEvents) => [
+            {
+              id: `evt-order-blocked-${messageId}`,
+              label: "Order blocked",
+              detail: `Requested ${analysis.orderQuantity}, available ${skuState?.stock ?? 0}.`,
+              status: "blocked",
+            },
+            ...currentEvents,
+          ]);
+          return;
+        }
+
+        const orderResponse = await placeBackendOrder(
+          analysis.skuId,
+          analysis.orderQuantity,
+          viewerName,
+        );
+
+        setBackendState(orderResponse.state);
+        setBackendError(null);
+        appendAgentReply(
+          `Order received for ${analysis.orderQuantity} ${analysis.sku?.name ?? analysis.skuId}.`,
+        );
+        setRoomState(readLocalRoomState());
+        setLedgerEvents((currentEvents) => [
+          {
+            id: `evt-order-placed-${messageId}`,
+            label: "Backend order placed",
+            detail: `${viewerName} ordered ${analysis.orderQuantity} ${analysis.sku?.name ?? analysis.skuId}.`,
+            status: "complete",
+          },
+          ...currentEvents,
+        ]);
+      } catch (error) {
+        setBackendError(
+          error instanceof Error ? error.message : "Backend unavailable",
+        );
+        appendQueueStatus({
+          id: `queue-order-review-${messageId}`,
+          title: "Order needs backend review",
+          detail:
+            "Order intent was detected, but the backend was unavailable or rejected the order.",
+          status: "Review",
+          analysis: {
+            intent: analysis.intent,
+            decision: "host_review",
+            risk: analysis.risk,
+            confidence: analysis.confidence,
+            skuId: analysis.skuId,
+            orderQuantity: analysis.orderQuantity,
+            reason: analysis.reason,
+          },
+        });
+        setLedgerEvents((currentEvents) => [
+          {
+            id: `evt-order-review-${messageId}`,
+            label: "Order requires review",
+            detail:
+              error instanceof Error ? error.message : "Backend unavailable",
+            status: "pending",
+          },
+          ...currentEvents,
+        ]);
+      }
+    },
+    [appendQueueStatus, backendState],
+  );
+
+  useEffect(() => {
+    for (const message of roomState.viewerMessages) {
+      if (processedMessageIds.current.has(message.id)) {
+        continue;
+      }
+
+      processedMessageIds.current.add(message.id);
+
+      const analysis = deterministicAnalyzeViewerMessage({
+        message: message.text,
+        activeSkuId,
+      });
+      const queueItem = createQueueItemFromAnalysis(message.id, message.text, analysis);
+
+      setQueueItems((currentItems) => [queueItem, ...currentItems]);
+      setLedgerEvents((currentEvents) => [
+        {
+          id: `evt-agent-analysis-${message.id}`,
+          label: "Viewer message analyzed",
+          detail: `${message.name}: ${analysis.reason}`,
+          status: analysis.decision === "block" ? "blocked" : "complete",
+        },
+        ...currentEvents,
+      ]);
+
+      if (
+        analysis.intent === "product_fact" &&
+        analysis.decision === "auto_reply" &&
+        analysis.reply
+      ) {
+        appendAgentReply(analysis.reply);
+        setRoomState(readLocalRoomState());
+        setLedgerEvents((currentEvents) => [
+          {
+            id: `evt-agent-reply-${message.id}`,
+            label: "Grounded reply sent",
+            detail: `Auto-sent grounded facts for ${analysis.sku?.name}.`,
+            status: "complete",
+          },
+          ...currentEvents,
+        ]);
+        continue;
+      }
+
+      if (analysis.intent === "order") {
+        processOrderMessage(message.id, message.name, analysis);
+        continue;
+      }
+
+      if (
+        ["promo_request", "skin_safety", "price_change_complaint"].includes(
+          analysis.intent,
+        )
+      ) {
+        setLedgerEvents((currentEvents) => [
+          {
+            id: `evt-host-review-${message.id}`,
+            label: "Host review required",
+            detail: `${analysis.intent} cannot be auto-sent. ${analysis.reason}`,
+            status: "pending",
+          },
+          ...currentEvents,
+        ]);
+      }
+    }
+  }, [activeSkuId, processOrderMessage, roomState.viewerMessages]);
+
   function appendLedger(event: LedgerEvent) {
     setLedgerEvents((currentEvents) => [
       {
@@ -283,6 +498,39 @@ export default function HostPage() {
         })
         .finally(() => setBackendBusy(false));
     }
+  }
+
+  function createQueueItemFromAnalysis(
+    messageId: string,
+    messageText: string,
+    analysis: ViewerMessageAnalysis,
+  ): QueueItem {
+    const status =
+      analysis.decision === "block"
+        ? "Blocked"
+        : analysis.decision === "auto_reply"
+          ? "Draft"
+          : "Review";
+    const skuLabel = analysis.sku?.name ?? "No SKU";
+    const quantityLabel = analysis.orderQuantity
+      ? ` · qty ${analysis.orderQuantity}`
+      : "";
+
+    return {
+      id: `queue-analysis-${messageId}`,
+      title: `${analysis.intent} · ${skuLabel}${quantityLabel}`,
+      detail: messageText,
+      status,
+      analysis: {
+        intent: analysis.intent,
+        decision: analysis.decision,
+        risk: analysis.risk,
+        confidence: analysis.confidence,
+        skuId: analysis.skuId,
+        orderQuantity: analysis.orderQuantity,
+        reason: analysis.reason,
+      },
+    };
   }
 
   function handleUseTranscriptMatch() {
@@ -616,6 +864,40 @@ export default function HostPage() {
                   <p className="mt-2 text-sm leading-6 text-slate-700">
                     {item.detail}
                   </p>
+                  {item.analysis ? (
+                    <div className="mt-3 grid gap-2 rounded-md border border-amber-200 bg-white/70 p-3 text-xs text-slate-700">
+                      <div className="grid gap-2 sm:grid-cols-2">
+                        <p>
+                          <span className="font-semibold">Intent:</span>{" "}
+                          {item.analysis.intent}
+                        </p>
+                        <p>
+                          <span className="font-semibold">Decision:</span>{" "}
+                          {item.analysis.decision}
+                        </p>
+                        <p>
+                          <span className="font-semibold">Risk:</span>{" "}
+                          {item.analysis.risk}
+                        </p>
+                        <p>
+                          <span className="font-semibold">Confidence:</span>{" "}
+                          {Math.round(item.analysis.confidence * 100)}%
+                        </p>
+                        <p>
+                          <span className="font-semibold">SKU:</span>{" "}
+                          {item.analysis.skuId ?? "Unresolved"}
+                        </p>
+                        <p>
+                          <span className="font-semibold">Qty:</span>{" "}
+                          {item.analysis.orderQuantity ?? "n/a"}
+                        </p>
+                      </div>
+                      <p className="leading-5">
+                        <span className="font-semibold">Reason:</span>{" "}
+                        {item.analysis.reason}
+                      </p>
+                    </div>
+                  ) : null}
                 </div>
               ))}
             </div>
