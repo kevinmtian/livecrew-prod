@@ -15,7 +15,7 @@ const scenarios: Array<{
   payload: Omit<MonitorSignalPayload, "online_viewers" | "online_viewers_delta">;
 }> = [
   {
-    label: "憋单场景",
+    label: "Value hesitation",
     payload: {
       gpm_cents: 31200,
       gpm_delta: -12.4,
@@ -30,7 +30,7 @@ const scenarios: Array<{
     },
   },
   {
-    label: "爆款冲刺",
+    label: "Hero SKU push",
     payload: {
       gpm_cents: 52800,
       gpm_delta: 26.8,
@@ -45,7 +45,7 @@ const scenarios: Array<{
     },
   },
   {
-    label: "暖场留人",
+    label: "Warm retention",
     payload: {
       gpm_cents: 18800,
       gpm_delta: -4.1,
@@ -60,7 +60,7 @@ const scenarios: Array<{
     },
   },
   {
-    label: "冷场预警",
+    label: "Cold-room alert",
     payload: {
       gpm_cents: 21600,
       gpm_delta: -7.8,
@@ -173,7 +173,7 @@ export default function MonitorPage() {
   const metricCards = useMemo(
     () => [
       {
-        label: "在线人数",
+        label: "Online viewers",
         value: payload.online_viewers.toLocaleString(),
         delta: formatSigned(payload.online_viewers_delta),
         tone: metricTone(payload.online_viewers_delta),
@@ -185,7 +185,7 @@ export default function MonitorPage() {
         tone: metricTone(payload.gpm_delta),
       },
       {
-        label: "转化率",
+        label: "Conversion rate",
         value: `${payload.conversion_rate.toFixed(1)}%`,
         delta: formatSigned(payload.conversion_rate_delta),
         tone: metricTone(payload.conversion_rate_delta),
@@ -276,12 +276,12 @@ export default function MonitorPage() {
   return (
     <AppShell
       eyebrow="Monitor"
-      title="监控 agent"
+      title="Monitor Agent"
       description="Monitor real viewer count, chat intent, high-intent density, and repeated unanswered questions."
     >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
-          <StatusPill tone="good">直播中</StatusPill>
+          <StatusPill tone="good">Live</StatusPill>
           <StatusPill>Live viewers {payload.online_viewers}</StatusPill>
           <StatusPill>{status === "running" ? "MonitorAgent running" : "MonitorAgent ready"}</StatusPill>
         </div>
@@ -304,7 +304,7 @@ export default function MonitorPage() {
       </div>
 
       <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_0.95fr]">
-        <Panel title="实时信号" eyebrow="agent input">
+        <Panel title="Live Signals" eyebrow="agent input">
           <div className="grid gap-3 md:grid-cols-2">
             {signalInputFields.map(({ key, label }) => (
               <label className="text-sm font-medium text-slate-700" key={key}>
@@ -365,7 +365,7 @@ export default function MonitorPage() {
             </div>
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-2">
-            <span className="text-sm text-slate-500">模拟场景：</span>
+            <span className="text-sm text-slate-500">Demo scenarios:</span>
             {scenarios.map((scenario) => (
               <button
                 className="min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-teal-300 hover:text-teal-800"
@@ -379,7 +379,7 @@ export default function MonitorPage() {
           </div>
         </Panel>
 
-        <Panel title="Agent 判断" eyebrow="scene and hook">
+        <Panel title="Agent Judgment" eyebrow="scene and hook">
           {response ? (
             <div className="rounded-md border border-rose-100 bg-rose-50 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -413,13 +413,13 @@ export default function MonitorPage() {
             </div>
           ) : (
             <p className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
-              点击运行监控判断，或选择一个模拟场景。
+              Run the monitor judgment or choose a demo scenario.
             </p>
           )}
         </Panel>
       </div>
 
-      <Panel title="Agent 触发记录" eyebrow="history">
+      <Panel title="Agent Trigger History" eyebrow="history">
         <div className="grid gap-3">
           {history.map((item) => (
             <article
@@ -443,7 +443,7 @@ export default function MonitorPage() {
             </article>
           ))}
           {history.length === 0 ? (
-            <p className="text-sm text-slate-500">暂无触发记录。</p>
+            <p className="text-sm text-slate-500">No trigger history yet.</p>
           ) : null}
         </div>
       </Panel>

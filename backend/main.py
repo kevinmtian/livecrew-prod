@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from backend.agents.answer_detection import assess_viewer_question_answered
 from backend.agents.cohost import get_cohost_debug_messages, reset_cohost_context
 from backend.agents.monitor import analyze_monitor_signals
 from backend.agents.viewer_insights import generate_viewer_word_cloud
@@ -30,6 +31,8 @@ from backend.models import (
     CoHostDebugMessagesResponse,
     TextEventRequest,
     TranscriptionResponse,
+    ViewerAnswerAssessmentRequest,
+    ViewerAnswerAssessmentResponse,
     ViewerComment,
     ViewerHeartbeatRequest,
     ViewerInsightRequest,
@@ -279,6 +282,22 @@ def viewer_word_cloud(request: ViewerInsightRequest):
     ][:200]
     commerce_store.replace(state)
     return snapshot
+
+
+@app.post(
+    "/viewer-interactions/answer-assessment",
+    response_model=ViewerAnswerAssessmentResponse,
+)
+def viewer_answer_assessment(request: ViewerAnswerAssessmentRequest):
+    question = request.question.strip()
+    host_transcript_text = request.host_transcript.strip()
+    if not question or not host_transcript_text:
+        raise HTTPException(status_code=400, detail="Question and transcript are required.")
+
+    assessment = assess_viewer_question_answered(question, host_transcript_text)
+    return ViewerAnswerAssessmentResponse(
+        answered=assessment.answered,
+    )
 
 
 @app.post("/events/monitor-signal", response_model=MonitorResponse)

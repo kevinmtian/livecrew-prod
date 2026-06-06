@@ -114,6 +114,10 @@ export type ViewerInsightSnapshot = {
   created_at: string;
 };
 
+export type ViewerAnswerAssessment = {
+  answered: boolean;
+};
+
 export type ViewerSession = {
   id: string;
   username: string;
@@ -303,6 +307,22 @@ export function generateViewerWordCloud(windowSeconds = 180) {
     method: "POST",
     body: JSON.stringify({ window_seconds: windowSeconds }),
   });
+}
+
+export function assessViewerQuestionAnswered(
+  question: string,
+  hostTranscript: string,
+) {
+  return requestJson<ViewerAnswerAssessment>(
+    "/viewer-interactions/answer-assessment",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        question,
+        host_transcript: hostTranscript,
+      }),
+    },
+  );
 }
 
 export function createRealtimeTranscriptionToken() {
