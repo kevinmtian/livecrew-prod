@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import json
 import os
 import re
+from dataclasses import dataclass
+from threading import Lock
 from typing import Literal
 
 from pydantic import BaseModel, Field, ValidationError
 
-from backend.models import AgentDecision, CommerceState, InputSource, ProposedAction
+from backend.models import (
+    AgentDecision,
+    CoHostDebugMessage,
+    CoHostDebugMessagesResponse,
+    CommerceState,
+    InputSource,
+    ProposedAction,
+    utc_now,
+)
 from backend.openai_client import get_openai_client
 from backend.tools.sku_resolver import get_sku_by_id, resolve_sku_from_text
 
@@ -17,7 +28,7 @@ PRICE_RE = re.compile(
 )
 FLASH_RE = re.compile(
     r"first\s+(\d+)\s+(?:buyers|orders|people)?.*?(?:at|for)\s+\$?(\d+(?:\.\d{1,2})?).*?(\d+)\s+minutes?",
-    re.IGNORECASE,
+    re.IGNORECASE | re.DOTALL,
 )
 STOCK_RE = re.compile(
     r"(?:stock|inventory|units)\D{0,24}(\d+)",
@@ -32,6 +43,17 @@ SUPPORTED_COHOST_ACTIONS = {
     "cancel_flash_sale",
     "noop",
 }
+MAX_USER_MESSAGES = 50
+SUMMARY_USER_MESSAGES = 25
+SUMMARY_MAX_CHARS = 7000
+
+
+@dataclass
+class CoHostMessage:
+    role: Literal["system", "user", "assistant"]
+    content: str
+    source_text: str = ""
+    is_open_user: bool = False
 
 
 class ExtractedHostAction(BaseModel):
@@ -75,47 +97,251 @@ def _catalogue_prompt(state: CommerceState) -> str:
     return "\n".join(sku_lines)
 
 
+def _action_list_prompt() -> str:
+    return "\n".join(
+        [
+            "- set_active_sku(sku_id)",
+            "- update_price(sku_id, price_cents)",
+            "- restore_price(sku_id)",
+            "- update_stock(sku_id, stock)",
+            "- create_flash_sale(sku_id, sale_price_cents, duration_seconds, stock_limit)",
+            "- cancel_flash_sale(sku_id)",
+            "- noop()",
+        ]
+    )
+
+
+def _commerce_state_prompt(state: CommerceState) -> str:
+    flash_sale = state.flash_sale.model_dump(mode="json") if state.flash_sale else None
+    pending_actions = [
+        pending.action.model_dump(mode="json", exclude_none=True)
+        for pending in state.pending_actions[:10]
+    ]
+    return json.dumps(
+        {
+            "active_sku_id": state.active_sku_id,
+            "flash_sale": flash_sale,
+            "pending_actions": pending_actions,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _system_prompt(state: CommerceState) -> str:
+    return (
+        "You are LiveCrew's CoHostAgent. Extract host livestream commerce "
+        "operations from chronological host transcript and assistant action-trace "
+        "messages into structured tool calls. Support English, Chinese, and "
+        "mixed-language phrasing. Return actions in the order the host intends "
+        "them to happen.\n\n"
+        "The user messages may contain merged transcript fragments when earlier "
+        "fragments were not actionable by themselves. Use the latest unresolved "
+        "host user message plus relevant prior action traces. Do not repeat a "
+        "tool call already present in assistant action traces or pending actions "
+        "unless the host clearly changes the request.\n\n"
+        "Supported action tool calls:\n"
+        f"{_action_list_prompt()}\n\n"
+        "Catalogue:\n"
+        f"{_catalogue_prompt(state)}\n\n"
+        "Current backend commerce state:\n"
+        f"{_commerce_state_prompt(state)}\n\n"
+        "Rules: Use only SKU ids from the catalogue. If a flash sale, price, "
+        "stock, restore, or cancel action has no explicit product, use the "
+        "current active SKU. Convert money expressions to integer cents, duration "
+        "expressions to seconds, stock updates to integer stock, and quantity "
+        "limits to integer stock_limit. For create_flash_sale, sale_price_cents "
+        "must come from the host's promotional price expression, not the catalogue "
+        "or current SKU price. Do not invent missing price, duration, quantity, "
+        "SKU, discounts, delivery promises, or unsupported claims. If required "
+        "fields are missing for update_price, update_stock, or create_flash_sale, "
+        "return noop so the next transcript segment can be merged and re-analyzed. "
+        "Use requires_host_confirmation only for complete but risky or ambiguous "
+        "tool calls."
+    )
+
+
+def _format_user_segment(text: str, input_source: InputSource) -> str:
+    timestamp = utc_now().isoformat()
+    return f"- {timestamp} [{input_source}] {text.strip()}"
+
+
+def _assistant_trace(actions: list[ProposedAction]) -> str:
+    return json.dumps(
+        {
+            "cohost_tool_calls": [
+                action.model_dump(mode="json", exclude_none=True)
+                for action in actions
+            ]
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _summarize_message_span(messages: list[CoHostMessage]) -> CoHostMessage:
+    lines = [
+        "Summary of earlier CoHost context. This summary is memory only; "
+        "current commerce facts must come from backend state and ledger."
+    ]
+    for message in messages:
+        role = message.role
+        content = message.content.replace("\n", " ").strip()
+        if len(content) > 900:
+            content = f"{content[:900]}..."
+        lines.append(f"{role}: {content}")
+
+    summary = "\n".join(lines)
+    if len(summary) > SUMMARY_MAX_CHARS:
+        summary = f"{summary[:SUMMARY_MAX_CHARS]}..."
+    return CoHostMessage(role="user", content=summary, source_text=summary)
+
+
+def _is_only_noop(actions: list[ProposedAction]) -> bool:
+    return not actions or all(action.type == "noop" for action in actions)
+
+
+class CoHostConversationContext:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._messages: list[CoHostMessage] = [
+            CoHostMessage(role="system", content="CoHostAgent system prompt pending.")
+        ]
+
+    def reset(self) -> None:
+        with self._lock:
+            self._messages = [
+                CoHostMessage(role="system", content="CoHostAgent system prompt pending.")
+            ]
+
+    def prepare_model_messages(
+        self,
+        text: str,
+        state: CommerceState,
+        input_source: InputSource,
+    ) -> tuple[str, list[dict[str, str]]]:
+        with self._lock:
+            self._messages[0] = CoHostMessage(role="system", content=_system_prompt(state))
+            self._append_or_merge_user_message(text, input_source)
+            self._summarize_if_needed()
+            return self._current_user_source_text(), self._messages_for_model()
+
+    def record_assistant_actions(self, actions: list[ProposedAction]) -> None:
+        with self._lock:
+            if _is_only_noop(actions):
+                return
+
+            for message in self._messages:
+                message.is_open_user = False
+            self._messages.append(
+                CoHostMessage(role="assistant", content=_assistant_trace(actions))
+            )
+            self._summarize_if_needed()
+
+    def debug_snapshot(self, state: CommerceState) -> CoHostDebugMessagesResponse:
+        with self._lock:
+            self._messages[0] = CoHostMessage(role="system", content=_system_prompt(state))
+            return CoHostDebugMessagesResponse(
+                messages=[
+                    CoHostDebugMessage(
+                        role=message.role,
+                        content=message.content,
+                        source_text=message.source_text,
+                        is_open_user=message.is_open_user,
+                    )
+                    for message in self._messages
+                ]
+            )
+
+    def _append_or_merge_user_message(self, text: str, input_source: InputSource) -> None:
+        clean_text = text.strip()
+        if not clean_text:
+            return
+
+        segment = _format_user_segment(clean_text, input_source)
+        open_user = next(
+            (message for message in reversed(self._messages) if message.is_open_user),
+            None,
+        )
+        if open_user:
+            open_user.content = f"{open_user.content}\n{segment}"
+            open_user.source_text = f"{open_user.source_text}\n{clean_text}".strip()
+            return
+
+        self._messages.append(
+            CoHostMessage(
+                role="user",
+                content=f"Host transcript segments awaiting CoHost action:\n{segment}",
+                source_text=clean_text,
+                is_open_user=True,
+            )
+        )
+
+    def _current_user_source_text(self) -> str:
+        open_user = next(
+            (message for message in reversed(self._messages) if message.is_open_user),
+            None,
+        )
+        if open_user:
+            return open_user.source_text
+
+        last_user = next(
+            (message for message in reversed(self._messages) if message.role == "user"),
+            None,
+        )
+        return last_user.source_text if last_user else ""
+
+    def _messages_for_model(self) -> list[dict[str, str]]:
+        return [
+            {"role": message.role, "content": message.content}
+            for message in self._messages
+        ]
+
+    def _summarize_if_needed(self) -> None:
+        user_indices = [
+            index
+            for index, message in enumerate(self._messages)
+            if message.role == "user"
+        ]
+        if len(user_indices) <= MAX_USER_MESSAGES:
+            return
+
+        selected_user_indices = user_indices[:SUMMARY_USER_MESSAGES]
+        start_index = selected_user_indices[0]
+        end_index = selected_user_indices[-1]
+        summary_message = _summarize_message_span(self._messages[start_index : end_index + 1])
+        self._messages = [
+            *self._messages[:start_index],
+            summary_message,
+            *self._messages[end_index + 1 :],
+        ]
+
+
+cohost_conversation_context = CoHostConversationContext()
+
+
+def reset_cohost_context() -> None:
+    cohost_conversation_context.reset()
+
+
+def get_cohost_debug_messages(state: CommerceState) -> CoHostDebugMessagesResponse:
+    return cohost_conversation_context.debug_snapshot(state)
+
+
 def _extract_actions_with_openai(
-    text: str,
-    state: CommerceState,
+    messages: list[dict[str, str]],
 ) -> list[ExtractedHostAction] | None:
     client = get_openai_client()
     if client is None:
         return None
 
-    model = os.getenv("OPENAI_COHOST_MODEL", "gpt-4o-mini")
-    system_prompt = (
-        "You are LiveCrew's CoHostAgent. Extract host livestream commerce "
-        "operations from natural language into structured actions. Support "
-        "English, Chinese, and mixed-language phrasing. Return actions in the "
-        "order the host intends them to happen.\n\n"
-        "Supported action types: set_active_sku, update_price, restore_price, "
-        "update_stock, create_flash_sale, cancel_flash_sale, noop.\n"
-        "Use only SKU ids from the provided catalogue. If a flash sale or price "
-        "or stock action has no explicit product, use the current active SKU. Convert "
-        "money expressions to integer cents, duration expressions to seconds, "
-        "stock updates to integer stock, and quantity limits to integer stock_limit. "
-        "For create_flash_sale, "
-        "sale_price_cents must come from the host's promotional price expression, "
-        "not the catalogue or current SKU price. Do not invent missing price, "
-        "duration, quantity, SKU, discounts, delivery promises, or unsupported claims. "
-        "If required fields are ambiguous or missing, return noop or mark the "
-        "action as requiring host confirmation."
-    )
-    user_prompt = (
-        f"Current active SKU id: {state.active_sku_id or 'none'}\n"
-        f"Catalogue:\n{_catalogue_prompt(state)}\n\n"
-        f"Host text:\n{text}"
-    )
+    model = os.getenv("OPENAI_COHOST_MODEL", "gpt-5.4-mini")
 
     try:
         completion = client.beta.chat.completions.parse(
             model=model,
             temperature=0,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=messages,
             response_format=HostActionExtraction,
         )
     except Exception:
@@ -183,6 +409,27 @@ def _build_proposed_action(
     sale_price_cents = extracted.sale_price_cents if action_type == "create_flash_sale" else None
     duration_seconds = extracted.duration_seconds if action_type == "create_flash_sale" else None
     stock_limit = extracted.stock_limit if action_type == "create_flash_sale" else None
+    missing_fields = _missing_required_fields(
+        action_type,
+        sku_id,
+        price_cents,
+        stock,
+        sale_price_cents,
+        duration_seconds,
+        stock_limit,
+    )
+    if missing_fields:
+        return ProposedAction(
+            type="noop",
+            source_text=text,
+            input_source=input_source,
+            confidence=min(extracted.confidence, 0.45),
+            reason=(
+                "CoHost is waiting for more host context before creating a "
+                f"{action_type} tool call; missing {', '.join(missing_fields)}."
+            ),
+            evidence=extracted.evidence,
+        )
 
     return ProposedAction(
         type=action_type,
@@ -199,6 +446,35 @@ def _build_proposed_action(
         evidence=extracted.evidence,
         requires_host_confirmation=extracted.requires_host_confirmation,
     )
+
+
+def _missing_required_fields(
+    action_type: str,
+    sku_id: str | None,
+    price_cents: int | None,
+    stock: int | None,
+    sale_price_cents: int | None,
+    duration_seconds: int | None,
+    stock_limit: int | None,
+) -> list[str]:
+    required_fields: dict[str, list[tuple[str, object | None]]] = {
+        "set_active_sku": [("sku_id", sku_id)],
+        "update_price": [("sku_id", sku_id), ("price_cents", price_cents)],
+        "restore_price": [("sku_id", sku_id)],
+        "update_stock": [("sku_id", sku_id), ("stock", stock)],
+        "create_flash_sale": [
+            ("sku_id", sku_id),
+            ("sale_price_cents", sale_price_cents),
+            ("duration_seconds", duration_seconds),
+            ("stock_limit", stock_limit),
+        ],
+        "cancel_flash_sale": [("sku_id", sku_id)],
+    }
+    return [
+        field_name
+        for field_name, value in required_fields.get(action_type, [])
+        if value is None
+    ]
 
 
 def _with_display_sku_action(
@@ -262,6 +538,7 @@ def _analyze_host_text_deterministic(
         )
 
     lower_text = text.lower()
+    promo_context = _has_promo_context(lower_text)
     if contextual_sku and "original price" in lower_text:
         actions.append(
             ProposedAction(
@@ -326,6 +603,7 @@ def _analyze_host_text_deterministic(
         and price_match
         and not flash_match
         and not stock_match
+        and not promo_context
         and "original price" not in lower_text
     ):
         actions.append(
@@ -362,24 +640,59 @@ def _analyze_host_text_deterministic(
     return decision, actions
 
 
+def _has_promo_context(lower_text: str) -> bool:
+    promo_markers = (
+        "flash",
+        "deal",
+        "promo",
+        "promotion",
+        "first",
+        "buyer",
+        "buyers",
+        "order",
+        "orders",
+        "minute",
+        "minutes",
+        "闪促",
+        "促销",
+        "限时",
+        "限量",
+        "前",
+    )
+    return any(marker in lower_text for marker in promo_markers)
+
+
 def analyze_host_text(
     text: str,
     state: CommerceState,
     input_source: InputSource,
 ) -> tuple[AgentDecision, list[ProposedAction]]:
+    source_text, messages = cohost_conversation_context.prepare_model_messages(
+        text,
+        state,
+        input_source,
+    )
     try:
-        extracted_actions = _extract_actions_with_openai(text, state)
+        extracted_actions = _extract_actions_with_openai(messages)
         if extracted_actions is not None:
-            actions = _to_proposed_actions(extracted_actions, text, state, input_source)
+            actions = _to_proposed_actions(
+                extracted_actions,
+                source_text,
+                state,
+                input_source,
+            )
             if actions:
                 decision = AgentDecision(
                     agent="CoHostAgent",
                     summary=f"Generated {len(actions)} proposed action(s) using OpenAI structured extraction.",
                     confidence=max(action.confidence for action in actions),
-                    source_text=text,
+                    source_text=source_text,
                 )
+                cohost_conversation_context.record_assistant_actions(actions)
                 return decision, actions
     except (ValidationError, ValueError):
         pass
 
-    return _analyze_host_text_deterministic(text, state, input_source)
+    decision, actions = _analyze_host_text_deterministic(source_text, state, input_source)
+    cohost_conversation_context.record_assistant_actions(actions)
+    return decision, actions

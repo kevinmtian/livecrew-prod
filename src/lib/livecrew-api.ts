@@ -168,6 +168,17 @@ export type RealtimeTranscriptionOfferResponse = {
   session_id: string | null;
 };
 
+export type CoHostDebugMessage = {
+  role: "system" | "user" | "assistant";
+  content: string;
+  source_text: string;
+  is_open_user: boolean;
+};
+
+export type CoHostDebugMessagesResponse = {
+  messages: CoHostDebugMessage[];
+};
+
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 export function getBackendUrl() {
@@ -218,6 +229,10 @@ export function sendViewerMessage(text: string, viewer = "viewer") {
     method: "POST",
     body: JSON.stringify({ text, viewer }),
   });
+}
+
+export function fetchCoHostDebugMessages() {
+  return requestJson<CoHostDebugMessagesResponse>("/debug/cohost-messages");
 }
 
 export function loginViewer(username: string) {

@@ -290,8 +290,20 @@ Examples:
 -> cancel_flash_sale
 ```
 
-Host transcript processing should support one proposed action or multiple proposed actions in a single utterance.
+Host transcript processing should support one proposed action or multiple proposed actions in a single utterance or in a multi-segment host thought.
 CoHostAgent should use OpenAI structured output for primary host intent extraction and return proposed actions in utterance order. Deterministic parsing remains a fallback when OpenAI is unavailable, times out, or returns invalid structured output; fallback output still passes through the same guardrails and commerce service.
+
+CoHost conversation context:
+
+- The backend maintains an ordered CoHost `messages` list for host operations. The list contains one system prompt message, host user messages, and assistant action-trace messages.
+- The system prompt is refreshed on each CoHost call and injects the seeded SKU catalogue, current backend commerce state, and supported action list/tool schema. SKU, price, stock, flash-sale, pending-action, and supported-action facts should come from backend state and constants, not from a stale summary.
+- Each finalized speech transcript or typed debug command is appended as the latest user message, then the CoHost model is called with the full bounded message list.
+- If the CoHost output is only `noop`, the backend does not append a durable assistant trace. The next host user message is merged into the previous open user message, preserving time order, and the merged message is re-analyzed.
+- Incomplete high-risk tool calls such as `update_price`, `update_stock`, or `create_flash_sale` with missing required fields are coerced to `noop` before assistant tracing, so partial transcript fragments keep accumulating instead of closing the host user message.
+- If the CoHost output includes any effective action, those actions are appended as the next assistant action-trace message, and the current user message is closed.
+- The context keeps at most 50 user-role messages. When that limit is exceeded, the earliest 25 user-role messages and their intervening assistant traces are summarized into one replacement user-role summary message inserted immediately after the system prompt, preserving chronological order.
+- Summaries are memory only. Commerce mutations, guardrail decisions, report metrics, current prices, stock, flash sale, orders, and ledger facts remain sourced from backend state and ledger.
+- The backend exposes a read-only debug snapshot of the current CoHost messages for the host cockpit. This snapshot may include system, user, and assistant action-trace content, but must never include API keys, realtime client secrets, or other credential material.
 
 Example:
 
@@ -635,6 +647,7 @@ POST /events/host-transcript
 POST /events/host-command
 POST /events/viewer-message
 POST /events/realtime-transcription-token
+GET  /debug/cohost-messages
 
 POST /viewer-login
 GET  /viewer-login/{session_id}
@@ -759,6 +772,37 @@ Request:
 ```
 
 Response should use the shared `WorkflowResponse` shape and include proposed actions, guardrail results, pending confirmations, ledger entries, and updated state.
+
+### `GET /debug/cohost-messages`
+
+Returns the current backend-managed CoHost LLM message context for host debugging.
+The system message is refreshed from current backend state before the response is returned.
+
+Response:
+
+```json
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are LiveCrew's CoHostAgent...",
+      "is_open_user": false
+    },
+    {
+      "role": "user",
+      "content": "Host transcript segments awaiting CoHost action...",
+      "source_text": "first 20 buyers",
+      "is_open_user": true
+    }
+  ]
+}
+```
+
+Backend behavior:
+
+- Return messages in the same chronological order used for CoHost LLM calls.
+- Include assistant action traces when they are part of the current CoHost context.
+- Do not include OpenAI API keys, realtime client secrets, or other credential material.
 
 ### `POST /events/viewer-message`
 

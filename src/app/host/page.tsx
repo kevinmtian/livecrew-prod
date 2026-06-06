@@ -21,12 +21,14 @@ import {
 } from "@/lib/local-room";
 import {
   type BackendState,
+  type CoHostDebugMessage,
   type PendingAction,
   type WorkflowResponse,
   approvePendingAction,
   createMediaSession,
   exchangeRealtimeTranscriptionOffer,
   fetchBackendState,
+  fetchCoHostDebugMessages,
   fetchMediaSession,
   getBackendUrl,
   postIceCandidate,
@@ -129,7 +131,8 @@ const initialLedger: LedgerEvent[] = [
 
 const boundedScrollAreaClass =
   "max-h-96 space-y-3 overflow-y-scroll pr-2 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300";
-const fixedLedgerScrollAreaClass = `h-96 ${boundedScrollAreaClass}`;
+const ledgerScrollAreaClass =
+  "min-h-72 max-h-96 space-y-3 overflow-y-auto pr-2 [scrollbar-gutter:stable] xl:min-h-0 xl:max-h-none xl:flex-1 [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300";
 
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
@@ -832,6 +835,12 @@ export default function HostPage() {
     Record<string, string>
   >({});
   const [liveTranscriptError, setLiveTranscriptError] = useState("");
+  const [debugMessagesVisible, setDebugMessagesVisible] = useState(false);
+  const [debugMessagesLoading, setDebugMessagesLoading] = useState(false);
+  const [debugMessagesError, setDebugMessagesError] = useState("");
+  const [cohostDebugMessages, setCohostDebugMessages] = useState<
+    CoHostDebugMessage[]
+  >([]);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -949,6 +958,24 @@ export default function HostPage() {
         ...currentLines,
       ].slice(0, 8),
     );
+  }
+
+  async function loadCoHostDebugMessages() {
+    setDebugMessagesVisible(true);
+    setDebugMessagesLoading(true);
+    setDebugMessagesError("");
+    try {
+      const response = await fetchCoHostDebugMessages();
+      setCohostDebugMessages(response.messages);
+      setBackendStatus("online");
+    } catch (error) {
+      setDebugMessagesError(
+        error instanceof Error ? error.message : "Unable to load CoHost messages.",
+      );
+      setBackendStatus("offline");
+    } finally {
+      setDebugMessagesLoading(false);
+    }
   }
 
   async function processFinalSpeechTranscript(text: string) {
@@ -1537,6 +1564,65 @@ export default function HostPage() {
               >
                 Stop stream
               </button>
+              <div
+                className="relative"
+                onMouseEnter={() => void loadCoHostDebugMessages()}
+                onMouseLeave={() => setDebugMessagesVisible(false)}
+              >
+                <button
+                  className="min-h-10 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700 transition hover:border-teal-300 hover:bg-white hover:text-teal-800"
+                  onFocus={() => void loadCoHostDebugMessages()}
+                  onBlur={() => setDebugMessagesVisible(false)}
+                  type="button"
+                >
+                  Messages
+                </button>
+                {debugMessagesVisible ? (
+                  <div className="absolute left-0 z-30 mt-2 w-[min(38rem,calc(100vw-3rem))] rounded-lg border border-slate-200 bg-white p-3 text-left shadow-xl">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <p className="text-xs font-semibold uppercase text-slate-500">
+                        CoHost LLM messages
+                      </p>
+                      <StatusPill tone={debugMessagesError ? "warning" : "neutral"}>
+                        {debugMessagesLoading ? "loading" : `${cohostDebugMessages.length}`}
+                      </StatusPill>
+                    </div>
+                    {debugMessagesError ? (
+                      <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-800">
+                        {debugMessagesError}
+                      </p>
+                    ) : (
+                      <div className="max-h-96 space-y-2 overflow-y-auto pr-2 text-xs leading-5 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300">
+                        {cohostDebugMessages.map((message, index) => (
+                          <div
+                            className="rounded-md border border-slate-200 bg-slate-50 p-2"
+                            key={`${message.role}-${index}`}
+                          >
+                            <div className="mb-1 flex flex-wrap items-center gap-2">
+                              <span className="rounded border border-slate-200 bg-white px-1.5 py-0.5 font-semibold uppercase text-slate-600">
+                                {message.role}
+                              </span>
+                              {message.is_open_user ? (
+                                <span className="rounded border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-semibold uppercase text-teal-700">
+                                  open
+                                </span>
+                              ) : null}
+                            </div>
+                            <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-slate-700">
+                              {message.content}
+                            </pre>
+                          </div>
+                        ))}
+                        {!debugMessagesLoading && cohostDebugMessages.length === 0 ? (
+                          <p className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-500">
+                            No CoHost messages yet.
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
             </div>
             {mediaError ? (
               <p className="mt-3 text-sm leading-6 text-amber-700">{mediaError}</p>
@@ -1926,9 +2012,9 @@ export default function HostPage() {
             title="CoHost Agent Event Timeline"
             eyebrow="Ledger"
             className="xl:min-h-0 xl:flex xl:flex-col"
-            contentClassName="xl:flex xl:flex-1 xl:flex-col"
+            contentClassName="xl:flex xl:min-h-0 xl:flex-1 xl:flex-col"
           >
-            <div className={fixedLedgerScrollAreaClass}>
+            <div className={ledgerScrollAreaClass}>
               {ledgerEvents.map((event) => {
                 const borderClass =
                   event.status === "blocked"

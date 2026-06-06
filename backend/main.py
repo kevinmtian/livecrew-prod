@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from backend.agents.cohost import get_cohost_debug_messages, reset_cohost_context
 from backend.agents.monitor import analyze_monitor_signals
 from backend.commerce import apply_action, approve_pending_action, reject_pending_action
 from backend.graphs.livecrew_graph import run_cohost_workflow, run_concierge_workflow
@@ -25,6 +26,7 @@ from backend.models import (
     SignalPayload,
     MonitorResponse,
     MonitorSignalRequest,
+    CoHostDebugMessagesResponse,
     TextEventRequest,
     TranscriptionResponse,
     ViewerHeartbeatRequest,
@@ -75,6 +77,7 @@ def get_state():
 @app.post("/reset")
 def reset_state():
     live_metrics_store.reset()
+    reset_cohost_context()
     return commerce_store.reset()
 
 
@@ -230,6 +233,11 @@ def viewer_metric_event(request: ViewerMetricEventRequest):
         request.event_type,
         request.text,
     )
+
+
+@app.get("/debug/cohost-messages", response_model=CoHostDebugMessagesResponse)
+def cohost_debug_messages():
+    return get_cohost_debug_messages(commerce_store.get())
 
 
 def _send_edited_pending_reply(

@@ -224,6 +224,10 @@ Expected behavior:
 - The livestream transcript area should use a quiet, integrated caption-console style rather than an alert-colored debug frame.
 - Only finalized transcript segments should trigger commerce actions.
 - Each finalized transcript segment should become a normalized `host_transcript` event.
+- Finalized host transcript segments should be appended to a backend-managed CoHost conversation context before action extraction, so multi-sentence host intents can be understood without relying on a fixed transcript window.
+- The CoHost conversation context should preserve ordered system, host user, and assistant action-trace messages. The system prompt should inject the seeded SKU catalogue, current commerce state, and supported action list on each model call.
+- If CoHostAgent returns only `noop`, the next host transcript segment should be merged into the previous host user message and the merged message should be re-analyzed. Effective actions should close the current host user message and be recorded as an assistant action trace.
+- The context should keep at most 50 user-role messages before summarizing the earliest 25 user-role messages into a replacement user-role summary inserted at the beginning of the chronological message history after the system prompt.
 - Transcript events should include timestamp, source, text, and processing status.
 - Transcription errors should be visible to the host and should not trigger agent actions.
 - The event ledger should record finalized transcript events that lead to proposed or applied actions.
@@ -234,7 +238,8 @@ Acceptance criteria:
 - Transcript preview, finalized transcript lines, idle state, and transcription errors remain readable without visually competing with the live video.
 - With `OPENAI_API_KEY` configured, host speech can produce finalized transcript events for CoHostAgent processing.
 - The host cockpit can receive OpenAI Realtime transcription delta events for preview and completed transcription events for backend processing.
-- A finalized transcript segment can trigger CoHostAgent intent recognition.
+- A finalized transcript segment can trigger CoHostAgent intent recognition using the current CoHost conversation context.
+- Consecutive transcript fragments that individually produce `noop` can later produce one valid action after they are merged into the same host user message.
 - If transcription fails, no commerce state is mutated.
 - The host can still use the typed CoHost debug input as a fallback for hackathon reliability.
 
@@ -258,6 +263,8 @@ Expected behavior:
 - Text commands should be clearly labeled as typed/debug input in transcript history and ledger evidence.
 - Text commands should not bypass safety checks, SKU grounding, price validation, or host confirmation.
 - The host should be able to submit text commands even when microphone permission, OpenAI realtime transcription, or camera capture is unavailable.
+- The host stream control row should include a debug messages button that reveals the current messages sent to the CoHost LLM when hovered, including system, host user, and assistant action-trace messages.
+- The debug messages view must be read-only and must not expose API keys, realtime client secrets, or any browser credential material.
 
 Acceptance criteria:
 
@@ -265,6 +272,7 @@ Acceptance criteria:
 - The UI shows whether an action came from speech transcription or typed debug input.
 - The ledger records the typed command source text and resulting proposed or applied action.
 - Invalid or ambiguous typed commands are escalated or rejected using the same rules as speech commands.
+- Hovering the host debug messages button displays the ordered CoHost LLM message context used for action extraction.
 
 ### FR-0B: Host Camera and Microphone Livestream to Viewer
 
@@ -653,6 +661,7 @@ The frontend should include:
 
 - Host microphone/transcription controls for the OpenAI realtime transcription flow.
 - Host text command input for CoHost Agent debugging.
+- Host debug messages button for inspecting the CoHost LLM message context.
 - Host camera and microphone permission controls.
 - Host local video preview with live/offline/muted states.
 - Host cockpit showing live transcript, active SKU, price, stock, flash sale, CoHost Agent Suggested Actions queue, and a CoHost Agent Event Timeline ledger panel.

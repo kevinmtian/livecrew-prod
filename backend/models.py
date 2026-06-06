@@ -173,6 +173,17 @@ class PendingReplyRequest(BaseModel):
     reply_text: str | None = None
 
 
+class CoHostDebugMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+    source_text: str = ""
+    is_open_user: bool = False
+
+
+class CoHostDebugMessagesResponse(BaseModel):
+    messages: list[CoHostDebugMessage] = Field(default_factory=list)
+
+
 class MonitorSignalRequest(BaseModel):
     online_viewers: int = Field(ge=0)
     online_viewers_delta: float
