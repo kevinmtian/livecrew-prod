@@ -245,7 +245,9 @@ def approve_pending_action(
     if not pending:
         return None
 
-    pending.status = "approved"
+    state.pending_actions = [
+        action for action in state.pending_actions if action.id != pending_action_id
+    ]
     action = pending.action.model_copy(update={"requires_host_confirmation": False})
     guardrail = validate_action(action, state, host_approved=True)
     applied, action_ledger = apply_action(action, guardrail, state)
@@ -275,7 +277,9 @@ def reject_pending_action(
     if not pending:
         return None
 
-    pending.status = "rejected"
+    state.pending_actions = [
+        action for action in state.pending_actions if action.id != pending_action_id
+    ]
     action = pending.action
     ledger_entry = LedgerEntry(
         type="host_confirmation_resolved",

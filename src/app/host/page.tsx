@@ -200,6 +200,7 @@ export default function HostPage() {
   const conciergeEscalations =
     backendState?.pending_actions.filter(
       (pending) =>
+        pending.status === "pending" &&
         pending.requested_by === "concierge" &&
         pending.action.type === "suggest_reply",
     ) ?? [];
@@ -1264,6 +1265,7 @@ export default function HostPage() {
                     <div className="mt-3 flex flex-wrap gap-2">
                       <button
                         className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                        disabled={resolvingActionId === pending.id}
                         onClick={() => void handleAcceptEscalation(pending.id)}
                         type="button"
                       >
@@ -1271,7 +1273,9 @@ export default function HostPage() {
                       </button>
                       <button
                         className="min-h-10 rounded-md border border-teal-200 bg-white px-3 text-sm font-semibold text-teal-800 transition hover:border-teal-400"
-                        disabled={!draftReply.trim()}
+                        disabled={
+                          !draftReply.trim() || resolvingActionId === pending.id
+                        }
                         onClick={() =>
                           void handleSendEditedEscalation(pending.id)
                         }
@@ -1281,6 +1285,7 @@ export default function HostPage() {
                       </button>
                       <button
                         className="min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                        disabled={resolvingActionId === pending.id}
                         onClick={() => void handleDiscardEscalation(pending.id)}
                         type="button"
                       >
