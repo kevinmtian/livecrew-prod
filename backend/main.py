@@ -9,6 +9,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from backend.commerce import approve_pending_action, reject_pending_action
 from backend.graphs.livecrew_graph import run_cohost_workflow
 from backend.media_signaling import media_store
 from backend.models import (
@@ -16,6 +17,7 @@ from backend.models import (
     SignalPayload,
     TextEventRequest,
     TranscriptionResponse,
+    WorkflowResponse,
 )
 from backend.openai_client import transcribe_audio_file
 from backend.state import commerce_store
@@ -27,7 +29,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -48,6 +52,46 @@ def get_state():
 @app.post("/reset")
 def reset_state():
     return commerce_store.reset()
+
+
+@app.post("/actions/{pending_action_id}/approve", response_model=WorkflowResponse)
+def approve_action(pending_action_id: str):
+    state = commerce_store.get()
+    result = approve_pending_action(pending_action_id, state)
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending action not found.")
+
+    applied_actions, guardrail_results, ledger_entries = result
+    state.ledger = [*ledger_entries, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return WorkflowResponse(
+        proposed_actions=[],
+        guardrail_results=guardrail_results,
+        pending_actions=updated_state.pending_actions,
+        applied_actions=applied_actions,
+        ledger_entries=ledger_entries,
+        state=updated_state,
+    )
+
+
+@app.post("/actions/{pending_action_id}/reject", response_model=WorkflowResponse)
+def reject_action(pending_action_id: str):
+    state = commerce_store.get()
+    result = reject_pending_action(pending_action_id, state)
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending action not found.")
+
+    guardrail_results, ledger_entries = result
+    state.ledger = [*ledger_entries, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return WorkflowResponse(
+        proposed_actions=[],
+        guardrail_results=guardrail_results,
+        pending_actions=updated_state.pending_actions,
+        applied_actions=[],
+        ledger_entries=ledger_entries,
+        state=updated_state,
+    )
 
 
 @app.post("/events/host-command")

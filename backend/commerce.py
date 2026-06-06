@@ -9,6 +9,7 @@ from backend.models import (
     ProposedAction,
     GuardrailResult,
 )
+from backend.policies.guardrails import validate_action
 from backend.tools.sku_resolver import get_sku_by_id
 
 
@@ -64,6 +65,27 @@ def apply_action(
             ),
         )
 
+    if action.type == "update_stock" and action.sku_id and action.stock is not None:
+        sku = get_sku_by_id(action.sku_id, state.skus)
+        if sku:
+            sku.stock = action.stock
+        if (
+            state.flash_sale
+            and state.flash_sale.sku_id == action.sku_id
+            and state.flash_sale.remaining_stock > action.stock
+        ):
+            state.flash_sale.remaining_stock = action.stock
+        detail = f"Updated stock to {action.stock} units."
+        return (
+            AppliedAction(type=action.type, sku_id=action.sku_id, detail=detail),
+            LedgerEntry(
+                type="stock_updated",
+                detail=detail,
+                source_text=action.source_text,
+                payload={"sku_id": action.sku_id, "stock": action.stock},
+            ),
+        )
+
     if action.type == "restore_price" and action.sku_id:
         sku = get_sku_by_id(action.sku_id, state.skus)
         if sku and sku.base_price_cents:
@@ -112,3 +134,67 @@ def apply_action(
         source_text=action.source_text,
         payload={"action": action.model_dump(mode="json")},
     )
+
+
+def _find_pending_action(
+    state: CommerceState,
+    pending_action_id: str,
+) -> PendingAction | None:
+    return next(
+        (
+            pending
+            for pending in state.pending_actions
+            if pending.id == pending_action_id and pending.status == "pending"
+        ),
+        None,
+    )
+
+
+def approve_pending_action(
+    pending_action_id: str,
+    state: CommerceState,
+) -> tuple[list[AppliedAction], list[GuardrailResult], list[LedgerEntry]] | None:
+    pending = _find_pending_action(state, pending_action_id)
+    if not pending:
+        return None
+
+    pending.status = "approved"
+    action = pending.action.model_copy(update={"requires_host_confirmation": False})
+    guardrail = validate_action(action, state, host_approved=True)
+    applied, action_ledger = apply_action(action, guardrail, state)
+    resolution_ledger = LedgerEntry(
+        type="host_confirmation_resolved",
+        detail=f"Host approved {action.type.replace('_', ' ')}.",
+        source_text=action.source_text,
+        payload={
+            "pending_action_id": pending.id,
+            "resolution": "approved",
+            "action": action.model_dump(mode="json"),
+        },
+    )
+
+    applied_actions = [applied] if applied else []
+    return applied_actions, [guardrail], [resolution_ledger, action_ledger]
+
+
+def reject_pending_action(
+    pending_action_id: str,
+    state: CommerceState,
+) -> tuple[list[GuardrailResult], list[LedgerEntry]] | None:
+    pending = _find_pending_action(state, pending_action_id)
+    if not pending:
+        return None
+
+    pending.status = "rejected"
+    action = pending.action
+    ledger_entry = LedgerEntry(
+        type="host_confirmation_resolved",
+        detail=f"Host rejected {action.type.replace('_', ' ')}.",
+        source_text=action.source_text,
+        payload={
+            "pending_action_id": pending.id,
+            "resolution": "rejected",
+            "action": action.model_dump(mode="json"),
+        },
+    )
+    return [pending.guardrail_result], [ledger_entry]

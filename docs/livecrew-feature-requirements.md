@@ -217,8 +217,9 @@ Host speaks: "Let's show the tumbler now."
 Expected behavior:
 
 - The host cockpit should provide a microphone-driven transcription flow for the demo.
-- Host audio should be streamed or chunked to the OpenAI API for low-latency transcription.
-- Partial transcript text may be shown in the host cockpit, but only finalized transcript segments should trigger commerce actions.
+- Host audio should use a realtime transcription flow for low-latency transcript display.
+- The host cockpit should show in-progress transcript text in the livestream panel while the host is speaking.
+- Only finalized transcript segments should trigger commerce actions.
 - Each finalized transcript segment should become a normalized `host_transcript` event.
 - Transcript events should include timestamp, source, text, and processing status.
 - Transcription errors should be visible to the host and should not trigger agent actions.
@@ -226,10 +227,11 @@ Expected behavior:
 
 Acceptance criteria:
 
-- With `OPENAI_API_KEY` configured, host speech can produce visible transcript text in the host cockpit.
+- While the host is speaking during a live stream, transcript text appears in the livestream transcript area.
+- With `OPENAI_API_KEY` configured, host speech can produce finalized transcript events for CoHostAgent processing.
 - A finalized transcript segment can trigger CoHostAgent intent recognition.
 - If transcription fails, no commerce state is mutated.
-- The host can still use typed demo transcript input as a fallback for hackathon reliability.
+- The host can still use the typed CoHost debug input as a fallback for hackathon reliability.
 
 ### FR-0A: Text Command Debug Input for CoHostAgent
 
@@ -246,6 +248,7 @@ Host types: "Switch to the sleep mask."
 Expected behavior:
 
 - The host cockpit should include a text command input dedicated to CoHostAgent debugging.
+- The typed debug input should be the only manual text entry point for CoHostAgent commands in the host cockpit.
 - Submitted text commands should use the same intent recognition, structured action schema, guardrails, host-confirmation flow, commerce executor, and ledger path as speech transcripts.
 - Text commands should be clearly labeled as typed/debug input in transcript history and ledger evidence.
 - Text commands should not bypass safety checks, SKU grounding, price validation, or host confirmation.
@@ -402,6 +405,37 @@ Acceptance criteria:
 - Risky discounts are blocked or escalated before execution.
 - The frontend price display updates from backend state.
 
+### FR-3A: Update SKU Stock
+
+The host should be able to update the current backend stock for a grounded SKU from the host cockpit or host command stream.
+
+Examples:
+
+```text
+"Set the tumbler stock to 60."
+-> update_stock for Bamboo Thermal Tumbler with stock 60.
+
+"Update this product inventory to 12."
+-> update_stock for the active SKU with stock 12.
+```
+
+Expected behavior:
+
+- Explicit SKU mentions should determine which SKU is affected.
+- If no SKU is explicitly mentioned, contextual phrases like "this product" should apply to the active SKU.
+- Stock changes should update backend SKU state, not just frontend display text.
+- Stock must be a non-negative integer.
+- Stock updates must use the same structured action, guardrail, commerce service, ledger, and realtime state path as other host actions.
+- Every stock update should be recorded in the ledger as `stock_updated`.
+- Viewer and host stock displays should update from backend state.
+
+Acceptance criteria:
+
+- Host stock changes produce an `update_stock` proposed action.
+- Approved stock changes update the target SKU `stock`.
+- Invalid stock values are blocked before execution.
+- The frontend stock display updates from backend state.
+
 ### FR-4: Create Limited Promotions by Speech
 
 The host should be able to create constrained promotions using natural language, including time limit, quantity limit, and promotional price.
@@ -477,6 +511,7 @@ Acceptance criteria:
 - Unsupported discount requests are blocked or escalated.
 - Ambiguous questions ask for clarification or host confirmation.
 - Host confirmations are visible in the agent queue and are stored in backend state, not only in local UI state.
+- Pending host confirmations in the host cockpit should provide approve and reject controls that resolve the backend pending action.
 - Replies reference current backend price and promotion state when relevant.
 - The event ledger records suggested replies and blocked claims.
 
@@ -585,7 +620,7 @@ The frontend should include:
 - Host text command input for CoHostAgent debugging.
 - Host camera and microphone permission controls.
 - Host local video preview with live/offline/muted states.
-- Host cockpit showing transcript, active SKU, price, stock, flash sale, agent queue, and ledger.
+- Host cockpit showing live transcript, active SKU, price, stock, flash sale, agent queue, and ledger.
 - Viewer room styled as a mobile livestream commerce room.
 - Viewer livestream area occupying the top two-thirds of the mobile room.
 - Viewer chat area occupying the bottom one-third of the mobile room.

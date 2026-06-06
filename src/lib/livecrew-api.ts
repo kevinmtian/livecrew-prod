@@ -8,6 +8,38 @@ export type BackendSku = {
   base_price_cents: number | null;
 };
 
+export type ProposedAction = {
+  type: string;
+  sku_id: string | null;
+  source_text: string;
+  input_source: string;
+  price_cents: number | null;
+  stock: number | null;
+  sale_price_cents: number | null;
+  duration_seconds: number | null;
+  stock_limit: number | null;
+  reply_text: string | null;
+  confidence: number;
+  reason: string | null;
+  evidence: string[];
+  requires_host_confirmation: boolean;
+};
+
+export type GuardrailResult = {
+  action_type: string;
+  allowed: boolean;
+  status: string;
+  reason: string;
+};
+
+export type PendingAction = {
+  id: string;
+  action: ProposedAction;
+  guardrail_result: GuardrailResult;
+  status: "pending" | "approved" | "rejected" | "overridden";
+  created_at: string;
+};
+
 export type BackendState = {
   active_sku_id: string | null;
   skus: BackendSku[];
@@ -19,6 +51,7 @@ export type BackendState = {
     duration_seconds: number;
     created_at: string;
   } | null;
+  pending_actions: PendingAction[];
   ledger: Array<{
     id: string;
     type: string;
@@ -38,21 +71,9 @@ export type WorkflowResponse = {
     source_text: string;
     created_at: string;
   }>;
-  proposed_actions: Array<{
-    type: string;
-    sku_id: string | null;
-    source_text: string;
-    input_source: string;
-    confidence: number;
-    reason: string | null;
-    evidence: string[];
-  }>;
-  guardrail_results: Array<{
-    action_type: string;
-    allowed: boolean;
-    status: string;
-    reason: string;
-  }>;
+  proposed_actions: ProposedAction[];
+  guardrail_results: GuardrailResult[];
+  pending_actions: PendingAction[];
   applied_actions: Array<{
     type: string;
     sku_id: string | null;
@@ -116,21 +137,16 @@ export function sendHostTranscript(text: string) {
   });
 }
 
-export async function transcribeAudio(blob: Blob) {
-  const formData = new FormData();
-  formData.append("file", blob, "host-audio.webm");
-
-  const response = await fetch(`${getBackendUrl()}/events/transcribe-audio`, {
+export function approvePendingAction(pendingActionId: string) {
+  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/approve`, {
     method: "POST",
-    body: formData,
   });
+}
 
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `Transcription failed with ${response.status}`);
-  }
-
-  return response.json() as Promise<{ text: string; source: string }>;
+export function rejectPendingAction(pendingActionId: string) {
+  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reject`, {
+    method: "POST",
+  });
 }
 
 export function createMediaSession() {

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 ActionType = Literal[
     "set_active_sku",
     "update_price",
+    "update_stock",
     "restore_price",
     "create_flash_sale",
     "cancel_flash_sale",
@@ -58,6 +59,7 @@ class ProposedAction(BaseModel):
     input_source: InputSource
     sku_id: str | None = None
     price_cents: int | None = None
+    stock: int | None = None
     sale_price_cents: int | None = None
     duration_seconds: int | None = None
     stock_limit: int | None = None
