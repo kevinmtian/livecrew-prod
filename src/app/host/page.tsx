@@ -76,6 +76,8 @@ type RealtimeTranscriptionEvent = {
   };
 };
 
+const MAX_VIEWER_MONITOR_QUEUE_ITEMS = 3;
+
 const initialLedger: LedgerEvent[] = [
   {
     id: "evt-initial-001",
@@ -330,7 +332,13 @@ export default function HostPage() {
         ),
     ) ??
     [];
-  const recentViewerComments = backendState?.viewer_comments.slice(0, 8) ?? [];
+  const viewerCommentCount = backendState?.viewer_comments.length ?? 0;
+  const recentViewerComments =
+    backendState?.viewer_comments.slice(0, MAX_VIEWER_MONITOR_QUEUE_ITEMS) ?? [];
+  const hiddenViewerCommentCount = Math.max(
+    0,
+    viewerCommentCount - recentViewerComments.length,
+  );
   const activeInsight = latestInsight ?? backendState?.viewer_insights[0] ?? null;
   const checkoutNudge = getHesitantCheckoutSummary(
     backendState?.checkout_intents ?? [],
@@ -1429,7 +1437,15 @@ export default function HostPage() {
               </p>
             ) : null}
 
-            <div className="mt-4 min-h-0 flex-1 space-y-3 overflow-y-auto">
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-900">Latest queue</p>
+              {hiddenViewerCommentCount > 0 ? (
+                <p className="text-xs font-medium text-slate-500">
+                  {hiddenViewerCommentCount} more archived
+                </p>
+              ) : null}
+            </div>
+            <div className="mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto">
               {recentViewerComments.map((comment) => (
                 <ViewerCommentCard
                   comment={comment}
@@ -1441,7 +1457,7 @@ export default function HostPage() {
               ))}
               {recentViewerComments.length === 0 ? (
                 <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
-                  No backend viewer comments yet.
+                  No queued viewer comments yet.
                 </p>
               ) : null}
             </div>

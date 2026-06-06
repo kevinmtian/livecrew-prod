@@ -560,7 +560,7 @@ Expected behavior:
 - ConciergeAgent should resolve SKU by explicit product mention first, then by the current active SKU for contextual comments such as "this one".
 - Suggested replies must cite only seeded SKU facts, current backend price, stock, and active flash-sale state.
 - Unsupported discounts, medical guarantees, delivery promises, authenticity claims, and unsafe claims should be handled with safe wording or host escalation instead of invented promises.
-- The host cockpit should show recent backend viewer comments, per-message AI draft replies, and controls to use a draft reply or ignore it.
+- The host cockpit should show recent backend viewer comments as a compact queue with at most three visible items, per-message AI draft replies, and controls to use a draft reply or ignore it.
 - Once per minute, the host cockpit should call the backend to summarize comments from the previous three minutes.
 - The word cloud should group repeated viewer language and product-specific themes into weighted terms.
 - The word cloud snapshot should include source comment count, time window, active SKU context, weighted intent breakdown, short summary, and suggested host talking points or replies.
@@ -574,6 +574,7 @@ Acceptance criteria:
 - A host can click a suggested reply from the monitoring panel and send it through the existing host reply flow.
 - The host cockpit refreshes the three-minute word cloud every minute and also provides a manual refresh for demo testing.
 - The host cockpit shows a compact intent breakdown so the host can quickly tell whether viewers are asking product questions, checking promos, ordering, or raising risk-sensitive topics.
+- The Viewer AI Monitor queue shows only the three newest backend viewer comments to avoid crowding the host cockpit.
 - The word cloud never exposes the OpenAI API key and does not call OpenAI from the browser.
 - Unsupported claims or discount requests do not produce invented commercial promises.
 
