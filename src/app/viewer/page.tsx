@@ -187,6 +187,8 @@ export default function ViewerPage() {
             base_price_cents: currentUnitPrice ?? 0,
           },
         ];
+  const activeProductImage =
+    skuImages[productShelf[0]?.id ?? backendActiveSkuId ?? fallbackProduct.id];
   const cartCount = Object.values(cartItems).reduce(
     (total, quantity) => total + quantity,
     0,
@@ -648,93 +650,134 @@ export default function ViewerPage() {
           ) : null}
 
           <div className="absolute inset-x-3 bottom-3 rounded-md border border-white/15 bg-white/92 p-3 shadow-sm backdrop-blur">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="truncate text-base font-semibold text-slate-950">
-                  {displayProduct.name}
-                </p>
-                {isFlashSaleActive && activeFlashSale ? (
-                  <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                    <p className="text-lg font-bold text-rose-700">
-                      {formatPrice(activeFlashSale.sale_price_cents)}
-                    </p>
-                    <p className="text-xs font-medium text-slate-500 line-through">
-                      {displayProduct.price}
+            {!cartOpen ? (
+              <>
+                <div className="grid grid-cols-[7rem_minmax(0,1fr)] items-start gap-3">
+                  <div className="h-28 w-28 overflow-hidden rounded-md bg-slate-200">
+                    {activeProductImage ? (
+                      <img
+                        alt={activeProductImage.alt}
+                        className="h-full w-full object-cover"
+                        src={activeProductImage.src}
+                      />
+                    ) : null}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="line-clamp-2 text-base font-semibold leading-5 text-slate-950">
+                          {displayProduct.name}
+                        </p>
+                        {isFlashSaleActive && activeFlashSale ? (
+                          <div className="mt-1 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                            <p className="text-lg font-bold text-rose-700">
+                              {formatPrice(activeFlashSale.sale_price_cents)}
+                            </p>
+                            <p className="text-xs font-medium text-slate-500 line-through">
+                              {displayProduct.price}
+                            </p>
+                          </div>
+                        ) : (
+                          <p className="mt-1 text-sm font-semibold text-teal-800">
+                            {displayProduct.price}
+                          </p>
+                        )}
+                      </div>
+                      <span className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                        {displayProduct.stock} left
+                      </span>
+                    </div>
+                    <p className="mt-2 max-h-16 overflow-hidden text-sm leading-5 text-slate-700">
+                      {displayProduct.facts.slice(0, 2).join(". ")}
                     </p>
                   </div>
-                ) : (
-                  <p className="mt-1 text-sm font-semibold text-teal-800">
-                    {displayProduct.price}
-                  </p>
-                )}
-              </div>
-              <span className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
-                {displayProduct.stock} left
-              </span>
-            </div>
-            <p className="mt-2 max-h-10 overflow-hidden text-sm leading-5 text-slate-700">
-              {displayProduct.facts.slice(0, 2).join(". ")}
-            </p>
-            {isFlashSaleActive && activeFlashSale ? (
-              <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2">
-                <div className="min-w-0">
-                  <p className="text-xs font-semibold uppercase text-rose-900">
-                    Flash sale
-                  </p>
-                  <p className="mt-0.5 truncate text-xs text-rose-700">
-                    {activeFlashSale.remaining_stock}/{activeFlashSale.stock_limit} left
-                  </p>
                 </div>
-                <div className="min-w-20 rounded-md bg-rose-700 px-3 py-1.5 text-center text-white shadow-sm">
-                  <p className="text-[10px] font-semibold uppercase leading-none text-white/75">
-                    Ends in
-                  </p>
-                  <p className="mt-1 font-mono text-xl font-bold leading-none">
-                    {flashSaleSecondsLeft}s
-                  </p>
-                </div>
-              </div>
-            ) : null}
-            <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-2">
-              <button
-                className="relative flex min-h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-slate-950 px-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
-                onClick={() => setCartOpen((isOpen) => !isOpen)}
-                type="button"
-              >
-                <CartIcon />
-                Cart
-                {cartCount > 0 ? (
-                  <span className="absolute -right-2 -top-2 min-w-5 rounded-full bg-rose-600 px-1.5 py-0.5 text-center text-[11px] leading-none text-white">
-                    {cartCount}
-                  </span>
+                {isFlashSaleActive && activeFlashSale ? (
+                  <div className="mt-3 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold uppercase text-rose-900">
+                        Flash sale
+                      </p>
+                      <p className="mt-0.5 truncate text-xs text-rose-700">
+                        {activeFlashSale.remaining_stock}/{activeFlashSale.stock_limit} left
+                      </p>
+                    </div>
+                    <div className="min-w-20 rounded-md bg-rose-700 px-3 py-1.5 text-center text-white shadow-sm">
+                      <p className="text-[10px] font-semibold uppercase leading-none text-white/75">
+                        Ends in
+                      </p>
+                      <p className="mt-1 font-mono text-xl font-bold leading-none">
+                        {flashSaleSecondsLeft}s
+                      </p>
+                    </div>
+                  </div>
                 ) : null}
-              </button>
-              <button
-                className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
-                disabled={cartCount <= 0 || checkoutStatus === "submitting"}
-                onClick={() => setCheckoutConfirmOpen(true)}
-                type="button"
-              >
-                {cartTotal ? `Checkout ${cartTotal}` : "Checkout"}
-              </button>
-            </div>
+                <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-2">
+                  <button
+                    className="relative flex min-h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-slate-950 px-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
+                    onClick={() => setCartOpen((isOpen) => !isOpen)}
+                    type="button"
+                  >
+                    <CartIcon />
+                    Cart
+                    {cartCount > 0 ? (
+                      <span className="absolute -right-2 -top-2 min-w-5 rounded-full bg-rose-600 px-1.5 py-0.5 text-center text-[11px] leading-none text-white">
+                        {cartCount}
+                      </span>
+                    ) : null}
+                  </button>
+                  <button
+                    className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                    disabled={cartCount <= 0 || checkoutStatus === "submitting"}
+                    onClick={() => setCheckoutConfirmOpen(true)}
+                    type="button"
+                  >
+                    {cartTotal ? `Checkout ${cartTotal}` : "Checkout"}
+                  </button>
+                </div>
+                {cartCount > 0 ? (
+                  <div className="mt-2 flex items-center justify-between rounded-md border border-teal-100 bg-teal-50 px-3 py-2 text-xs text-teal-900">
+                    <span className="font-semibold">
+                      Cart: {cartCount} item{cartCount === 1 ? "" : "s"}
+                    </span>
+                    <button
+                      className="font-semibold text-teal-800 underline-offset-2 hover:underline"
+                      onClick={() => setCartOpen(true)}
+                      type="button"
+                    >
+                      Edit
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
             {cartOpen ? (
-              <div className="mt-2 max-h-52 overflow-y-auto rounded-md border border-slate-200 bg-white p-2">
+              <div className="rounded-md border border-slate-200 bg-white p-2">
                 <div className="mb-2 flex items-center justify-between px-1">
                   <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                     Product cart
                   </p>
-                  {cartCount > 0 ? (
+                  <div className="flex items-center gap-2">
+                    {cartCount > 0 ? (
+                      <button
+                        className="text-xs font-semibold text-teal-800 underline-offset-2 hover:underline"
+                        onClick={() => setCartItems({})}
+                        type="button"
+                      >
+                        Clear
+                      </button>
+                    ) : null}
                     <button
-                      className="text-xs font-semibold text-teal-800 underline-offset-2 hover:underline"
-                      onClick={() => setCartItems({})}
+                      aria-label="Close cart"
+                      className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
+                      onClick={() => setCartOpen(false)}
                       type="button"
                     >
-                      Clear
+                      ×
                     </button>
-                  ) : null}
+                  </div>
                 </div>
-                <div className="space-y-2">
+                <div className="max-h-72 space-y-2 overflow-y-auto pr-1 [scrollbar-gutter:stable]">
                   {productShelf.map((sku) => {
                     const quantity = cartItems[sku.id] ?? 0;
                     const skuFlashSale =
@@ -813,19 +856,13 @@ export default function ViewerPage() {
                     );
                   })}
                 </div>
-              </div>
-            ) : null}
-            {cartCount > 0 ? (
-              <div className="mt-2 flex items-center justify-between rounded-md border border-teal-100 bg-teal-50 px-3 py-2 text-xs text-teal-900">
-                <span className="font-semibold">
-                  Cart: {cartCount} item{cartCount === 1 ? "" : "s"}
-                </span>
                 <button
-                  className="font-semibold text-teal-800 underline-offset-2 hover:underline"
-                  onClick={() => setCartOpen(true)}
+                  className="mt-3 min-h-10 w-full rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                  disabled={cartCount <= 0 || checkoutStatus === "submitting"}
+                  onClick={() => setCheckoutConfirmOpen(true)}
                   type="button"
                 >
-                  Edit
+                  {cartTotal ? `Checkout ${cartTotal}` : "Checkout"}
                 </button>
               </div>
             ) : null}
