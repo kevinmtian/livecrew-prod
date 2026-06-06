@@ -216,6 +216,15 @@ class ViewerInsightRequest(BaseModel):
     window_seconds: int = Field(default=180, ge=30, le=900)
 
 
+class ViewerAnswerAssessmentRequest(BaseModel):
+    question: str = Field(min_length=1)
+    host_transcript: str = Field(min_length=1)
+
+
+class ViewerAnswerAssessmentResponse(BaseModel):
+    answered: bool = False
+
+
 class CoHostDebugMessage(BaseModel):
     role: Literal["system", "user", "assistant"]
     content: str
