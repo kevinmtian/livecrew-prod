@@ -183,12 +183,12 @@ export default function HostPage() {
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
-  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const viewerPeersRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const transcriptionPeerRef = useRef<RTCPeerConnection | null>(null);
   const transcriptionDataChannelRef = useRef<RTCDataChannel | null>(null);
   const completedTranscriptIdsRef = useRef<Set<string>>(new Set());
   const answerPollRef = useRef<number | null>(null);
-  const viewerCandidateCountRef = useRef(0);
+  const viewerCandidateCountsRef = useRef<Map<string, number>>(new Map());
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
   const backendActiveSku = backendState?.skus.find(
@@ -215,6 +215,12 @@ export default function HostPage() {
     ) ??
     [];
 
+  function closeViewerPeers() {
+    viewerPeersRef.current.forEach((peer) => peer.close());
+    viewerPeersRef.current.clear();
+    viewerCandidateCountsRef.current.clear();
+  }
+
   useEffect(() => {
     function syncRoomState() {
       const nextRoomState = readLocalRoomState();
@@ -235,7 +241,7 @@ export default function HostPage() {
       }
       unsubscribe();
       stopRealtimeTranscription();
-      peerRef.current?.close();
+      closeViewerPeers();
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
@@ -691,40 +697,68 @@ export default function HostPage() {
       setMediaSessionId(session.session_id);
       setHostMediaSession(session.session_id, "starting");
 
-      const peer = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-      });
-      peerRef.current = peer;
-      viewerCandidateCountRef.current = 0;
-
-      stream.getTracks().forEach((track) => peer.addTrack(track, stream));
-      peer.onicecandidate = (event) => {
-        if (event.candidate) {
-          void postIceCandidate(session.session_id, "host", event.candidate.toJSON());
-        }
-      };
-
-      const offer = await peer.createOffer();
-      await peer.setLocalDescription(offer);
-      await postMediaOffer(session.session_id, offer);
-
       answerPollRef.current = window.setInterval(async () => {
         const latest = await fetchMediaSession(session.session_id);
-        if (latest.answer && !peer.currentRemoteDescription) {
-          await peer.setRemoteDescription(latest.answer);
+        if (latest.status === "stopped") {
+          await stopHostStream();
+          return;
+        }
+
+        const viewerIds = Array.from(
+          new Set([
+            ...(latest.viewer_ids ?? []),
+            ...Object.keys(latest.viewer_answers ?? {}),
+            ...Object.keys(latest.viewer_ice_candidates ?? {}),
+          ]),
+        );
+
+        for (const viewerId of viewerIds) {
+          let peer = viewerPeersRef.current.get(viewerId);
+          if (!peer) {
+            peer = new RTCPeerConnection({
+              iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+            });
+            viewerPeersRef.current.set(viewerId, peer);
+            viewerCandidateCountsRef.current.set(viewerId, 0);
+            stream.getTracks().forEach((track) => peer?.addTrack(track, stream));
+            peer.onicecandidate = (event) => {
+              if (event.candidate) {
+                void postIceCandidate(
+                  session.session_id,
+                  "host",
+                  event.candidate.toJSON(),
+                  viewerId,
+                );
+              }
+            };
+
+            const offer = await peer.createOffer();
+            await peer.setLocalDescription(offer);
+            await postMediaOffer(session.session_id, offer, viewerId);
+          }
+
+          const answer = latest.viewer_answers?.[viewerId];
+          if (answer && !peer.currentRemoteDescription) {
+            await peer.setRemoteDescription(answer);
+          }
+
+          const viewerCandidates = latest.viewer_ice_candidates?.[viewerId] ?? [];
+          const consumedCount = viewerCandidateCountsRef.current.get(viewerId) ?? 0;
+          const newCandidates = viewerCandidates.slice(consumedCount);
+          viewerCandidateCountsRef.current.set(viewerId, viewerCandidates.length);
+          for (const candidate of newCandidates) {
+            await peer.addIceCandidate(candidate);
+          }
+        }
+
+        if (viewerPeersRef.current.size > 0) {
           setStreamStatus("live");
           setHostMediaSession(session.session_id, "live");
-        }
-        const newCandidates = latest.viewer_candidates.slice(
-          viewerCandidateCountRef.current,
-        );
-        viewerCandidateCountRef.current = latest.viewer_candidates.length;
-        for (const candidate of newCandidates) {
-          await peer.addIceCandidate(candidate);
         }
       }, 1000);
     } catch (error) {
       stopRealtimeTranscription();
+      closeViewerPeers();
       setStreamStatus("offline");
       setHostMediaSession(null, "offline");
       setMediaError(
@@ -739,8 +773,7 @@ export default function HostPage() {
       answerPollRef.current = null;
     }
     stopRealtimeTranscription();
-    peerRef.current?.close();
-    peerRef.current = null;
+    closeViewerPeers();
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
     localStreamRef.current = null;
     if (localVideoRef.current) {
@@ -759,7 +792,7 @@ export default function HostPage() {
       ? "good"
       : liveTranscriptStatus === "unsupported" || liveTranscriptStatus === "error"
         ? "warning"
-        : "neutral";
+    : "neutral";
 
   return (
     <AppShell
