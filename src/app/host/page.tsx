@@ -9,6 +9,7 @@ import {
   resolveSkuById,
 } from "@/lib/catalogue";
 import {
+  appendAgentReply,
   appendHostReply,
   defaultLocalRoomState,
   type LocalRoomState,
@@ -32,6 +33,7 @@ import {
   postMediaOffer,
   rejectPendingAction,
   resetBackendState,
+  sendEditedPendingReply,
   sendHostCommand,
   sendHostTranscript,
   stopMediaSession,
@@ -168,6 +170,9 @@ export default function HostPage() {
   const [liveTranscriptStatus, setLiveTranscriptStatus] = useState<
     "idle" | "connecting" | "listening" | "unsupported" | "error"
   >("idle");
+  const [editedEscalationReplies, setEditedEscalationReplies] = useState<
+    Record<string, string>
+  >({});
   const [liveTranscriptError, setLiveTranscriptError] = useState("");
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -183,9 +188,24 @@ export default function HostPage() {
   const backendActiveSku = backendState?.skus.find(
     (sku) => sku.id === backendState.active_sku_id,
   );
+  const liveRoomMessages = [...roomState.viewerMessages, ...roomState.replies].sort(
+    (firstMessage, secondMessage) => firstMessage.createdAt - secondMessage.createdAt,
+  );
+  const conciergeEscalations =
+    backendState?.pending_actions.filter(
+      (pending) =>
+        pending.requested_by === "concierge" &&
+        pending.action.type === "suggest_reply",
+    ) ?? [];
   const pendingConfirmations =
     backendState?.pending_actions.filter(
-      (pending) => pending.status === "pending" && pending.action.type !== "noop",
+      (pending) =>
+        pending.status === "pending" &&
+        pending.action.type !== "noop" &&
+        !(
+          pending.requested_by === "concierge" &&
+          pending.action.type === "suggest_reply"
+        ),
     ) ??
     [];
 
@@ -198,8 +218,12 @@ export default function HostPage() {
     syncRoomState();
     void syncBackendState();
     const unsubscribe = subscribeToLocalRoom(syncRoomState);
+    const backendPollId = window.setInterval(() => {
+      void syncBackendState();
+    }, 3000);
 
     return () => {
+      window.clearInterval(backendPollId);
       if (answerPollRef.current) {
         window.clearInterval(answerPollRef.current);
       }
@@ -218,7 +242,9 @@ export default function HostPage() {
       setStockInput(getActiveStockInputValue(state));
       const nextSkuId = getValidSkuId(state.active_sku_id);
       setActiveSkuId(nextSkuId);
-      setRoomActiveSku(nextSkuId);
+      if (readLocalRoomState().activeSkuId !== nextSkuId) {
+        setRoomActiveSku(nextSkuId);
+      }
     } catch {
       setBackendStatus("offline");
     }
@@ -418,10 +444,14 @@ export default function HostPage() {
         .map((action) => ({
           id: `queue-${action.type}-${Date.now()}-${Math.random()}`,
           title: action.type.replaceAll("_", " "),
-          detail: action.reason ?? "CoHostAgent produced a structured action.",
+          detail:
+            action.reply_text ??
+            action.reason ??
+            "Agent produced a structured action.",
           status: response.guardrail_results.some(
             (result) =>
-              result.action_type === action.type && result.status === "blocked",
+              result.action_type === action.type &&
+              result.status === "blocked",
           )
             ? ("Blocked" as const)
             : response.guardrail_results.some(
@@ -434,6 +464,83 @@ export default function HostPage() {
         })),
       ...currentItems,
     ]);
+    if (response.suggested_reply) {
+      appendAgentReply(response.suggested_reply);
+      setRoomState(readLocalRoomState());
+    }
+  }
+
+  function applyConciergeResolution(response: WorkflowResponse) {
+    applyWorkflowResponse(response);
+    setEditedEscalationReplies((currentReplies) => {
+      const nextReplies = { ...currentReplies };
+      response.ledger_entries.forEach((entry) => {
+        const pendingActionId = entry.payload?.pending_action_id;
+        if (typeof pendingActionId === "string") {
+          delete nextReplies[pendingActionId];
+        }
+      });
+      return nextReplies;
+    });
+  }
+
+  async function handleAcceptEscalation(pendingActionId: string) {
+    setResolvingActionId(pendingActionId);
+    try {
+      const response = await approvePendingAction(pendingActionId);
+      applyConciergeResolution(response);
+    } catch (error) {
+      appendLedger({
+        id: "evt-escalation-accept-error",
+        label: "Escalation failed",
+        detail:
+          error instanceof Error ? error.message : "Unable to accept reply draft.",
+        status: "blocked",
+      });
+    } finally {
+      setResolvingActionId(null);
+    }
+  }
+
+  async function handleSendEditedEscalation(pendingActionId: string) {
+    const replyText = editedEscalationReplies[pendingActionId]?.trim();
+    if (!replyText) {
+      return;
+    }
+
+    setResolvingActionId(pendingActionId);
+    try {
+      const response = await sendEditedPendingReply(pendingActionId, replyText);
+      applyConciergeResolution(response);
+    } catch (error) {
+      appendLedger({
+        id: "evt-escalation-edit-error",
+        label: "Edited reply failed",
+        detail:
+          error instanceof Error ? error.message : "Unable to send edited reply.",
+        status: "blocked",
+      });
+    } finally {
+      setResolvingActionId(null);
+    }
+  }
+
+  async function handleDiscardEscalation(pendingActionId: string) {
+    setResolvingActionId(pendingActionId);
+    try {
+      const response = await rejectPendingAction(pendingActionId);
+      applyConciergeResolution(response);
+    } catch (error) {
+      appendLedger({
+        id: "evt-escalation-discard-error",
+        label: "Discard failed",
+        detail:
+          error instanceof Error ? error.message : "Unable to discard reply draft.",
+        status: "blocked",
+      });
+    } finally {
+      setResolvingActionId(null);
+    }
   }
 
   async function handleResolvePendingAction(
@@ -1097,9 +1204,133 @@ export default function HostPage() {
           eyebrow="Viewer room"
           className="xl:col-start-3 xl:row-start-3"
         >
+            <div className="space-y-3">
+              {conciergeEscalations.map((pending) => {
+                const draftReply =
+                  editedEscalationReplies[pending.id] ??
+                  pending.action.reply_text ??
+                  "";
+
+                return (
+                  <div
+                    className="rounded-md border border-amber-300 bg-amber-50 p-3"
+                    key={pending.id}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-slate-950">
+                        Escalated
+                      </p>
+                      <StatusPill tone="warning">Host review</StatusPill>
+                    </div>
+                    <div className="mt-3 space-y-2 text-sm leading-6">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Viewer question
+                        </p>
+                        <p className="text-slate-800">
+                          {pending.action.source_text}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Reason
+                        </p>
+                        <p className="text-slate-800">
+                          {pending.guardrail_result.reason}
+                        </p>
+                      </div>
+                      <label className="block">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Draft reply
+                        </span>
+                        <textarea
+                          className="mt-1 min-h-24 w-full resize-y rounded-md border border-amber-200 bg-white p-3 text-sm leading-6 outline-none transition focus:border-teal-500"
+                          onChange={(event) =>
+                            setEditedEscalationReplies((currentReplies) => ({
+                              ...currentReplies,
+                              [pending.id]: event.target.value,
+                            }))
+                          }
+                          value={draftReply}
+                        />
+                      </label>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                        onClick={() => void handleAcceptEscalation(pending.id)}
+                        type="button"
+                      >
+                        Accept
+                      </button>
+                      <button
+                        className="min-h-10 rounded-md border border-teal-200 bg-white px-3 text-sm font-semibold text-teal-800 transition hover:border-teal-400"
+                        disabled={!draftReply.trim()}
+                        onClick={() =>
+                          void handleSendEditedEscalation(pending.id)
+                        }
+                        type="button"
+                      >
+                        Send edited
+                      </button>
+                      <button
+                        className="min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+                        onClick={() => void handleDiscardEscalation(pending.id)}
+                        type="button"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div className="max-h-72 space-y-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-3">
+                {liveRoomMessages.length ? (
+                  liveRoomMessages.map((message) => {
+                    const isViewer = message.sender === "viewer";
+                    const isAgent = message.sender === "agent";
+
+                    return (
+                      <div
+                        className={`rounded-md border bg-white p-3 ${
+                          isViewer
+                            ? "border-slate-200"
+                            : isAgent
+                              ? "border-teal-200"
+                              : "border-slate-200"
+                        }`}
+                        key={message.id}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p
+                            className={`text-xs font-semibold uppercase tracking-wide ${
+                              isAgent ? "text-teal-700" : "text-slate-500"
+                            }`}
+                          >
+                            {message.name}
+                          </p>
+                          <StatusPill tone={isAgent ? "good" : "neutral"}>
+                            {message.sender}
+                          </StatusPill>
+                        </div>
+                        <p className="mt-1 text-sm leading-6 text-slate-800">
+                          {message.text}
+                        </p>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="text-sm leading-6 text-slate-500">
+                    No viewer room replies yet.
+                  </p>
+                )}
+              </div>
+            </div>
+
             <form onSubmit={handleSendHostReply}>
               <input
-                className="min-h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-teal-500"
+                className="mt-3 min-h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-teal-500"
                 onChange={(event) => setReplyInput(event.target.value)}
                 placeholder="Send a host reply"
                 value={replyInput}

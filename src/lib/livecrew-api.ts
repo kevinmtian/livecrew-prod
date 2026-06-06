@@ -11,6 +11,7 @@ export type BackendSku = {
 export type ProposedAction = {
   type: string;
   sku_id: string | null;
+  quantity: number | null;
   source_text: string;
   input_source: string;
   price_cents: number | null;
@@ -19,6 +20,7 @@ export type ProposedAction = {
   duration_seconds: number | null;
   stock_limit: number | null;
   reply_text: string | null;
+  viewer: string | null;
   confidence: number;
   reason: string | null;
   evidence: string[];
@@ -36,6 +38,7 @@ export type PendingAction = {
   id: string;
   action: ProposedAction;
   guardrail_result: GuardrailResult;
+  requested_by: string;
   status: "pending" | "approved" | "rejected" | "overridden";
   created_at: string;
 };
@@ -51,12 +54,21 @@ export type BackendState = {
     duration_seconds: number;
     created_at: string;
   } | null;
+  orders: Array<{
+    id: string;
+    sku_id: string;
+    quantity: number;
+    unit_price_cents: number;
+    viewer: string;
+    created_at: string;
+  }>;
   pending_actions: PendingAction[];
   ledger: Array<{
     id: string;
     type: string;
     detail: string;
     source_text: string | null;
+    payload?: Record<string, unknown>;
     created_at: string;
   }>;
   updated_at: string;
@@ -80,6 +92,7 @@ export type WorkflowResponse = {
     detail: string;
   }>;
   ledger_entries: BackendState["ledger"];
+  suggested_reply: string | null;
   state: BackendState;
 };
 
@@ -169,6 +182,20 @@ export function sendHostTranscript(text: string) {
   return requestJson<WorkflowResponse>("/events/host-transcript", {
     method: "POST",
     body: JSON.stringify({ text, source: "speech_transcript" }),
+  });
+}
+
+export function sendViewerMessage(text: string, viewer = "viewer") {
+  return requestJson<WorkflowResponse>("/events/viewer-message", {
+    method: "POST",
+    body: JSON.stringify({ text, viewer }),
+  });
+}
+
+export function sendEditedPendingReply(pendingActionId: string, replyText: string) {
+  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reply`, {
+    method: "POST",
+    body: JSON.stringify({ reply_text: replyText }),
   });
 }
 

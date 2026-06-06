@@ -502,18 +502,23 @@ Examples:
 Expected behavior:
 
 - The ConciergeAgent uses the OpenAI API to classify viewer intent and draft a response.
-- Product questions should resolve SKU by explicit mention first, then active SKU.
+- Totally irrelevant viewer messages should produce a no-reply decision and should not send an automatic chat reply.
+- Product questions should resolve SKU by explicit mention first, then the active pinned SKU for contextual references such as "this product".
+- If a product question cannot be grounded to an identified SKU, the ConciergeAgent should produce a no-reply decision instead of guessing.
 - Answers must use SKU facts and current backend state such as price, stock, and active flash sale.
+- If the requested product detail is not present in grounded facts or current commerce state, the reply should say the system cannot verify that detail.
 - The agent may answer routine grounded questions without host approval.
 - The agent must not invent discounts, delivery promises, authenticity claims, medical guarantees, or unsupported product claims.
-- Risky, ambiguous, or unsupported requests should be escalated to the host.
+- Risky or unsupported requests, including discount, health, allergy, medical, skin safety, delivery, authenticity, or unsupported guarantee questions, should be escalated to the host without sending an automatic viewer reply.
+- Escalations should show the viewer's raw question, escalation reason, ConciergeAgent drafted reply, and controls for the host to accept, edit and send, or discard the reply.
 - Viewer Q&A events should be recorded for analytics and report generation.
+- The host cockpit's Viewer Room / Host Reply area should show the reply record, including the original viewer question and automatic or host-approved reply when one is sent.
 
 Acceptance criteria:
 
 - Product fact questions produce `suggest_reply` actions with grounded evidence and structured LLM output.
-- Unsupported discount requests are blocked or escalated.
-- Ambiguous questions ask for clarification or host confirmation.
+- Unsupported discount and health-related requests are escalated as pending host-review drafts and do not auto-send.
+- Irrelevant or ungrounded messages produce no suggested reply.
 - Host confirmations are visible in the agent queue and are stored in backend state, not only in local UI state.
 - Pending host confirmations in the host cockpit should provide approve and reject controls that resolve the backend pending action.
 - Replies reference current backend price and promotion state when relevant.

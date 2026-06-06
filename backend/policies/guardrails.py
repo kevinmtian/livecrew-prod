@@ -4,6 +4,37 @@ from backend.models import CommerceState, GuardrailResult, ProposedAction
 from backend.tools.sku_resolver import get_sku_by_id
 
 
+UNSUPPORTED_REPLY_TERMS = {
+    "free shipping",
+    "same day delivery",
+    "authentic guaranteed",
+    "guaranteed authentic",
+    "cures acne",
+    "cure acne",
+    "treats acne",
+    "medical guarantee",
+}
+
+
+def _reply_contains_unsupported_claim(reply_text: str) -> bool:
+    normalized = reply_text.lower()
+    if any(term in normalized for term in UNSUPPORTED_REPLY_TERMS):
+        has_safety_language = any(
+            phrase in normalized
+            for phrase in {
+                "cannot",
+                "can't",
+                "do not",
+                "don't",
+                "not verified",
+                "no verified",
+                "need the host to confirm",
+            }
+        )
+        return not has_safety_language
+    return False
+
+
 def validate_action(
     action: ProposedAction,
     state: CommerceState,
@@ -24,6 +55,54 @@ def validate_action(
             status="blocked",
             reason="Action references an unknown SKU.",
         )
+
+    if action.type == "request_host_confirmation":
+        return GuardrailResult(
+            action_type=action.type,
+            allowed=False,
+            status="needs_host_confirmation",
+            reason=action.reason or "Host confirmation is required.",
+        )
+
+    if action.type == "suggest_reply":
+        if not action.reply_text:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="blocked",
+                reason="Suggested reply needs reply text.",
+            )
+        if _reply_contains_unsupported_claim(action.reply_text):
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="blocked",
+                reason="Suggested reply contains an unsupported claim.",
+            )
+
+    if action.type == "create_order":
+        if not action.sku_id:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="needs_host_confirmation",
+                reason="Order needs a grounded SKU before it can be recorded.",
+            )
+        if action.quantity is None or action.quantity <= 0:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="needs_host_confirmation",
+                reason="Order needs a clear positive quantity.",
+            )
+        sku = get_sku_by_id(action.sku_id, state.skus)
+        if sku and action.quantity > sku.stock:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="blocked",
+                reason="Order quantity exceeds current SKU stock.",
+            )
 
     if action.type in {
         "set_active_sku",

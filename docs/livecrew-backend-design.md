@@ -485,13 +485,24 @@ Output:
 Responsibilities:
 
 - Classify viewer messages.
-- Resolve SKU from explicit mention first, then active SKU.
+- Return no proposed actions for totally irrelevant viewer messages.
+- Resolve SKU from explicit mention first, then the active pinned SKU for contextual product references.
+- Return no proposed actions when a product question cannot be grounded to a SKU.
 - Extract order quantity from natural language.
 - Generate grounded product replies from SKU facts and current commerce state.
+- Say that a detail cannot be verified when the requested product detail is not present in grounded SKU facts or current commerce state.
 - Propose `create_order` only when order intent is clear.
-- Escalate ambiguous SKU, unclear quantity, unsupported discounts, and unsafe claims.
+- Escalate unclear quantity, unsupported discounts, health or allergy questions, unsafe claims, and unverified promotion or guarantee requests as pending host-reviewed reply drafts.
 
 It cannot invent discounts, delivery promises, authenticity claims, medical guarantees, or unsupported product claims.
+
+Host escalation behavior:
+
+- Risky ConciergeAgent replies are stored as pending `suggest_reply` actions with `requested_by="concierge"`.
+- Pending escalation payloads include the viewer raw question, escalation reason, and drafted reply.
+- The host cockpit can accept the draft, edit and send the draft, or discard it with no viewer reply.
+- Accepted or edited replies are validated by guardrails before being recorded as `answer_suggested` ledger events and returned to the frontend as `suggested_reply`.
+- Discarded drafts append a `host_confirmation_resolved` ledger event and do not emit a suggested reply.
 
 ### GuardrailNode
 
@@ -721,6 +732,8 @@ Request:
 ```
 
 Response should include decisions, guardrail result, applied actions, ledger entries, and updated state.
+Irrelevant or ungrounded messages may return an empty `proposed_actions` list and `suggested_reply: null`.
+Risky messages return a pending ConciergeAgent `suggest_reply` action and `suggested_reply: null` until host review.
 
 Preferred shared response shape:
 
@@ -736,6 +749,18 @@ class WorkflowResponse(BaseModel):
     report: ProducerReport | None
     state: CommerceState
 ```
+
+### `POST /actions/{pending_action_id}/approve`
+
+Accept a pending ConciergeAgent reply draft and send it to the viewer after guardrail validation.
+
+### `POST /actions/{pending_action_id}/reply`
+
+Send an edited reply for a pending ConciergeAgent escalation after guardrail validation.
+
+### `POST /actions/{pending_action_id}/reject`
+
+Discard a pending ConciergeAgent escalation without sending a viewer reply.
 
 ## 12. Realtime Updates
 
