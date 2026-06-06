@@ -10,6 +10,7 @@ export type RoomMessage = {
   name: string;
   text: string;
   createdAt: number;
+  handledByAgent?: boolean;
 };
 
 export type LocalMonitorSignal = {
@@ -80,6 +81,13 @@ function normalizeMessages(value: unknown): RoomMessage[] {
         ["viewer", "host", "agent"].includes(candidate.sender)
       );
     })
+    .map((message) => ({
+      ...message,
+      handledByAgent:
+        typeof message.handledByAgent === "boolean"
+          ? message.handledByAgent
+          : false,
+    }))
     .slice(-MAX_MESSAGES);
 }
 
@@ -216,6 +224,20 @@ export function appendViewerMessage(text: string, name = "Viewer") {
   }));
 
   return message;
+}
+
+export function markViewerMessageHandledByAgent(messageId: string) {
+  writeLocalRoomState((currentState) => ({
+    ...currentState,
+    viewerMessages: currentState.viewerMessages.map((message) =>
+      message.id === messageId
+        ? {
+            ...message,
+            handledByAgent: true,
+          }
+        : message,
+    ),
+  }));
 }
 
 export function appendHostReply(text: string) {
