@@ -656,6 +656,7 @@ The frontend should include:
 - Host camera and microphone permission controls.
 - Host local video preview with live/offline/muted states.
 - Host cockpit showing live transcript, active SKU, price, stock, flash sale, CoHost Agent Suggested Actions queue, and a CoHost Agent Event Timeline ledger panel.
+- Host cockpit should include a display-only Agent Workflow panel that explains the current live flow from input through routing, tools, guardrail or commerce decision, action, and trace/reflection using existing page/backend state.
 - Dashboard panels should show only the main panel title, without smaller eyebrow labels above it.
 - CoHost Agent queue and ledger history should use matching bounded scroll areas so long demo runs do not stretch the cockpit layout.
 - On desktop, Monitor Agent and CoHost Agent Event Timeline should sit side by side with matching width and height.
