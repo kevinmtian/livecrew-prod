@@ -1,6 +1,12 @@
 "use client";
 
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
+import {
+  type BackendCommerceState,
+  fetchBackendState,
+  formatMoney,
+  getBackendActiveSkuId,
+} from "@/lib/backend-commerce";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
   appendViewerMessage,
@@ -52,10 +58,26 @@ const flashSale = {
 export default function ViewerPage() {
   const [roomState, setRoomState] =
     useState<LocalRoomState>(defaultLocalRoomState);
-  const [messageInput, setMessageInput] = useState("");
-  const activeProduct = getActiveSkuDisplay(
-    roomState.activeSkuId ?? defaultActiveSkuId,
+  const [backendState, setBackendState] = useState<BackendCommerceState | null>(
+    null,
   );
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [messageInput, setMessageInput] = useState("");
+  const backendActiveSkuId = getBackendActiveSkuId(backendState);
+  const activeProduct = getActiveSkuDisplay(
+    backendActiveSkuId ?? roomState.activeSkuId ?? defaultActiveSkuId,
+  );
+  const activeBackendSku = backendState?.skus[activeProduct.id];
+  const activeFlashSale =
+    backendState?.flash_sale?.sku_id === activeProduct.id
+      ? backendState.flash_sale
+      : null;
+  const displayedPrice = activeFlashSale
+    ? formatMoney(activeFlashSale.sale_price)
+    : activeBackendSku
+      ? formatMoney(activeBackendSku.current_price)
+      : activeProduct.price;
+  const displayedStock = activeBackendSku?.stock ?? activeProduct.stock;
 
   useEffect(() => {
     function syncRoomState() {
@@ -65,6 +87,37 @@ export default function ViewerPage() {
     syncRoomState();
 
     return subscribeToLocalRoom(syncRoomState);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollBackendState() {
+      const controller = new AbortController();
+
+      try {
+        const state = await fetchBackendState(controller.signal);
+
+        if (!cancelled) {
+          setBackendState(state);
+          setBackendError(null);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setBackendError(
+            error instanceof Error ? error.message : "Backend unavailable",
+          );
+        }
+      }
+    }
+
+    pollBackendState();
+    const intervalId = window.setInterval(pollBackendState, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
@@ -96,16 +149,22 @@ export default function ViewerPage() {
                   {activeProduct.name}
                 </h2>
                 <p className="mt-2 text-2xl font-semibold text-teal-800">
-                  {activeProduct.price}
+                  {displayedPrice}
                 </p>
               </div>
-              <StatusPill tone="good">{activeProduct.stock} left</StatusPill>
+              <StatusPill tone="good">{displayedStock} left</StatusPill>
             </div>
             <ul className="mt-5 space-y-2 text-sm leading-6 text-slate-700">
               {activeProduct.facts.map((fact) => (
                 <li key={fact}>- {fact}</li>
               ))}
             </ul>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <StatusPill tone={backendState ? "good" : "warning"}>
+                {backendState ? "Backend synced" : "Local fallback"}
+              </StatusPill>
+              {backendError ? <StatusPill tone="warning">Backend offline</StatusPill> : null}
+            </div>
           </div>
           <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -113,12 +172,23 @@ export default function ViewerPage() {
                 Limited-time offer
               </p>
               <StatusPill tone="warning">
-                ends in {flashSale.secondsLeft}s
+                ends in{" "}
+                {activeFlashSale
+                  ? activeFlashSale.ends_in_seconds
+                  : flashSale.secondsLeft}
+                s
               </StatusPill>
             </div>
             <p className="mt-2 text-sm text-amber-800">
-              {flashSale.sold}/{flashSale.total} left
+              {activeFlashSale
+                ? `${activeFlashSale.sold}/${activeFlashSale.quantity} left`
+                : `${flashSale.sold}/${flashSale.total} left`}
             </p>
+            {activeFlashSale ? (
+              <p className="mt-2 text-sm font-semibold text-amber-900">
+                Backend flash sale: {formatMoney(activeFlashSale.sale_price)}
+              </p>
+            ) : null}
           </div>
         </Panel>
         <div className="grid gap-4">

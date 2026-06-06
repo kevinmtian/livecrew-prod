@@ -2,6 +2,18 @@
 
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
 import {
+  type BackendCommerceState,
+  createBackendFlashSale,
+  fetchBackendState,
+  formatMoney,
+  getBackendActiveSkuId,
+  getBackendBaseUrl,
+  getBackendSkuName,
+  groupOrdersBySku,
+  listBackendProduct,
+  resetBackendCommerce,
+} from "@/lib/backend-commerce";
+import {
   type SkuId,
   commerceCatalogue,
   defaultActiveSkuId,
@@ -145,6 +157,11 @@ export default function HostPage() {
   const [roomState, setRoomState] =
     useState<LocalRoomState>(defaultLocalRoomState);
   const [replyInput, setReplyInput] = useState("");
+  const [backendState, setBackendState] = useState<BackendCommerceState | null>(
+    null,
+  );
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [backendBusy, setBackendBusy] = useState(false);
   const [queueItems, setQueueItems] = useState<QueueItem[]>([
     {
       id: "queue-initial",
@@ -156,9 +173,18 @@ export default function HostPage() {
   ]);
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
+  const activeBackendSku = backendState?.skus[activeProduct.id];
+  const activeShelfPrice = activeBackendSku
+    ? formatMoney(activeBackendSku.current_price)
+    : activeProduct.price;
+  const activeShelfStock = activeBackendSku?.stock ?? activeProduct.stock;
   const transcriptMention = useMemo(
     () => resolveSkuFromText(transcript),
     [transcript],
+  );
+  const backendOrderGroups = useMemo(
+    () => groupOrdersBySku(backendState),
+    [backendState],
   );
 
   useEffect(() => {
@@ -166,12 +192,51 @@ export default function HostPage() {
       const nextRoomState = readLocalRoomState();
 
       setRoomState(nextRoomState);
-      setActiveSkuId(nextRoomState.activeSkuId);
     }
 
     syncRoomState();
 
     return subscribeToLocalRoom(syncRoomState);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function pollBackendState() {
+      const controller = new AbortController();
+
+      try {
+        const state = await fetchBackendState(controller.signal);
+
+        if (cancelled) {
+          return;
+        }
+
+        const backendActiveSkuId = getBackendActiveSkuId(state);
+
+        setBackendState(state);
+        setBackendError(null);
+
+        if (backendActiveSkuId) {
+          setActiveSkuId(backendActiveSkuId);
+          setRoomActiveSku(backendActiveSkuId);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setBackendError(
+            error instanceof Error ? error.message : "Backend unavailable",
+          );
+        }
+      }
+    }
+
+    pollBackendState();
+    const intervalId = window.setInterval(pollBackendState, 2000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
   }, []);
 
   function appendLedger(event: LedgerEvent) {
@@ -184,10 +249,40 @@ export default function HostPage() {
     ]);
   }
 
-  function updateActiveSku(nextSkuId: SkuId) {
+  async function refreshBackendState() {
+    const state = await fetchBackendState();
+    const backendActiveSkuId = getBackendActiveSkuId(state);
+
+    setBackendState(state);
+    setBackendError(null);
+
+    if (backendActiveSkuId) {
+      setActiveSkuId(backendActiveSkuId);
+      setRoomActiveSku(backendActiveSkuId);
+    }
+
+    return state;
+  }
+
+  function updateActiveSku(nextSkuId: SkuId, syncBackend = true) {
     setActiveSkuId(nextSkuId);
     setRoomActiveSku(nextSkuId);
     setRoomState(readLocalRoomState());
+
+    if (syncBackend) {
+      setBackendBusy(true);
+      listBackendProduct(nextSkuId)
+        .then((state) => {
+          setBackendState(state);
+          setBackendError(null);
+        })
+        .catch((error) => {
+          setBackendError(
+            error instanceof Error ? error.message : "Backend unavailable",
+          );
+        })
+        .finally(() => setBackendBusy(false));
+    }
   }
 
   function handleUseTranscriptMatch() {
@@ -228,7 +323,7 @@ export default function HostPage() {
 
   function handleResetDemo() {
     setTranscript(initialTranscript);
-    updateActiveSku(defaultActiveSkuId);
+    updateActiveSku(defaultActiveSkuId, false);
     resetLocalRoomState();
     setRoomState(readLocalRoomState());
     setScriptIndex(0);
@@ -243,6 +338,18 @@ export default function HostPage() {
         status: "Review",
       },
     ]);
+    setBackendBusy(true);
+    resetBackendCommerce()
+      .then((state) => {
+        setBackendState(state);
+        setBackendError(null);
+      })
+      .catch((error) => {
+        setBackendError(
+          error instanceof Error ? error.message : "Backend unavailable",
+        );
+      })
+      .finally(() => setBackendBusy(false));
   }
 
   function handleSendHostReply(event: FormEvent<HTMLFormElement>) {
@@ -263,6 +370,54 @@ export default function HostPage() {
       detail: `Host sent reply to viewer room: ${trimmedReply}`,
       status: "complete",
     });
+  }
+
+  function handleRefreshBackend() {
+    setBackendBusy(true);
+    refreshBackendState()
+      .catch((error) => {
+        setBackendError(
+          error instanceof Error ? error.message : "Backend unavailable",
+        );
+      })
+      .finally(() => setBackendBusy(false));
+  }
+
+  function handleCreateFlashSale() {
+    const currentPrice = activeBackendSku?.current_price ?? 24;
+    const salePrice = Math.max(1, Math.round(currentPrice * 0.85 * 100) / 100);
+
+    setBackendBusy(true);
+    createBackendFlashSale(activeProduct.id, salePrice)
+      .then((state) => {
+        const backendActiveSkuId = getBackendActiveSkuId(state);
+
+        setBackendState(state);
+        setBackendError(null);
+
+        if (backendActiveSkuId) {
+          setActiveSkuId(backendActiveSkuId);
+          setRoomActiveSku(backendActiveSkuId);
+        }
+      })
+      .catch((error) => {
+        setBackendError(
+          error instanceof Error ? error.message : "Backend unavailable",
+        );
+      })
+      .finally(() => setBackendBusy(false));
+  }
+
+  function formatBackendPayload(payload: Record<string, unknown>) {
+    const entries = Object.entries(payload).map(([key, value]) => {
+      if (typeof value === "number") {
+        return `${key}: ${Number.isInteger(value) ? value : formatMoney(value)}`;
+      }
+
+      return `${key}: ${String(value)}`;
+    });
+
+    return entries.join(" · ");
   }
 
   return (
@@ -323,7 +478,9 @@ export default function HostPage() {
                   ? `Detected ${transcriptMention.name}`
                   : "No SKU detected"}
               </StatusPill>
-              <StatusPill>Local state only</StatusPill>
+              <StatusPill>
+                Backend {backendState ? "connected" : "optional"}
+              </StatusPill>
             </div>
           </Panel>
           <Panel title="Viewer Chat" eyebrow="Live messages">
@@ -367,7 +524,7 @@ export default function HostPage() {
                     {activeProduct.name}
                   </h2>
                   <p className="mt-1 text-sm text-slate-600">
-                    {activeProduct.price} · {activeProduct.stockLabel}
+                    {activeShelfPrice} · {activeShelfStock} in stock
                   </p>
                 </div>
                 <StatusPill tone="good">Highlighted</StatusPill>
@@ -403,7 +560,11 @@ export default function HostPage() {
                 >
                   <span className="block font-semibold">{sku.name}</span>
                   <span className="mt-1 block text-xs">
-                    {sku.price} · {sku.stock} in stock
+                    {backendState?.skus[sku.id]
+                      ? `${formatMoney(backendState.skus[sku.id].current_price)} · ${
+                          backendState.skus[sku.id].stock
+                        } in stock`
+                      : `${sku.price} · ${sku.stock} in stock`}
                   </span>
                 </button>
               ))}
@@ -463,6 +624,25 @@ export default function HostPage() {
         <div className="grid gap-4">
           <Panel title="Agent Event Timeline" eyebrow="Commerce ledger">
             <div className="space-y-3">
+              {backendState?.event_ledger
+                .slice()
+                .reverse()
+                .map((event) => (
+                  <div
+                    className="border-l-2 border-sky-500 pl-3"
+                    key={event.id}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-slate-900">
+                        Backend: {event.type}
+                      </p>
+                      <StatusPill tone="good">Backend</StatusPill>
+                    </div>
+                    <p className="mt-1 text-sm leading-6 text-slate-600">
+                      {formatBackendPayload(event.payload)}
+                    </p>
+                  </div>
+                ))}
               {ledgerEvents.map((event) => {
                 const borderClass =
                   event.status === "blocked"
@@ -497,11 +677,117 @@ export default function HostPage() {
               })}
             </div>
           </Panel>
-          <Panel title="Backend Commerce" eyebrow="Placeholder">
-            <p className="text-sm leading-6 text-slate-600">
-              Backend state, orders, flash sales, and SKU KPIs will connect in a
-              later prompt.
-            </p>
+          <Panel title="Backend Commerce" eyebrow={getBackendBaseUrl()}>
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <StatusPill tone={backendState ? "good" : "warning"}>
+                  {backendState ? "Connected" : "Waiting for backend"}
+                </StatusPill>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 transition hover:border-teal-300 hover:text-teal-800"
+                    disabled={backendBusy}
+                    onClick={handleRefreshBackend}
+                    type="button"
+                  >
+                    Refresh
+                  </button>
+                  <button
+                    className="min-h-9 rounded-md bg-teal-700 px-3 text-xs font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                    disabled={backendBusy}
+                    onClick={handleCreateFlashSale}
+                    type="button"
+                  >
+                    Create flash sale
+                  </button>
+                </div>
+              </div>
+              {backendError ? (
+                <p className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm leading-6 text-amber-900">
+                  {backendError}. Start FastAPI on port 8000 to enable backend
+                  state.
+                </p>
+              ) : null}
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Active backend SKU
+                </p>
+                <p className="mt-1 text-sm font-semibold text-slate-900">
+                  {backendState?.active_sku_id
+                    ? getBackendSkuName(backendState, backendState.active_sku_id)
+                    : "No backend SKU listed"}
+                </p>
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Current prices and stock
+                </p>
+                {backendState ? (
+                  Object.values(backendState.skus).map((sku) => (
+                    <div
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-slate-50 p-3"
+                      key={sku.id}
+                    >
+                      <p className="text-sm font-semibold text-slate-900">
+                        {sku.name}
+                      </p>
+                      <p className="text-sm text-slate-600">
+                        {formatMoney(sku.current_price)} · {sku.stock} in stock
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">No backend state yet.</p>
+                )}
+              </div>
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">
+                  Flash sale
+                </p>
+                {backendState?.flash_sale ? (
+                  <div className="mt-2 text-sm leading-6 text-amber-900">
+                    <p className="font-semibold">
+                      {backendState.flash_sale.name} ·{" "}
+                      {formatMoney(backendState.flash_sale.sale_price)}
+                    </p>
+                    <p>
+                      {backendState.flash_sale.sold}/
+                      {backendState.flash_sale.quantity} sold · ends in{" "}
+                      {backendState.flash_sale.ends_in_seconds}s
+                    </p>
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-amber-900">
+                    No active backend flash sale.
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Orders by SKU
+                </p>
+                {backendOrderGroups.length > 0 ? (
+                  backendOrderGroups.map((group) => (
+                    <div
+                      className="grid gap-1 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm sm:grid-cols-[1fr_auto_auto]"
+                      key={group.skuId}
+                    >
+                      <p className="font-semibold text-slate-900">
+                        {group.name}
+                      </p>
+                      <p className="text-slate-600">{group.units} units</p>
+                      <p className="font-semibold text-slate-900">
+                        {formatMoney(group.gmv)} GMV
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    No backend orders yet.
+                  </p>
+                )}
+              </div>
+            </div>
           </Panel>
           <Panel title="Producer Report" eyebrow="Placeholder">
             <p className="text-sm leading-6 text-slate-600">
