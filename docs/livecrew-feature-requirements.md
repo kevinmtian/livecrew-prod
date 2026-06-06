@@ -671,6 +671,7 @@ The backend should provide:
 - Report generation endpoint.
 - Server-side OpenAI client configuration using `OPENAI_API_KEY` from `.env`.
 - Realtime transcription endpoint or bridge for host speech.
+- Host realtime transcription setup should go through the Python backend, not directly from the browser to OpenAI, so local demo runs can bypass certificate verification in backend OpenAI setup calls when the machine has a broken CA chain.
 - Structured LLM action generation for CoHostAgent, ConciergeAgent, and ProducerAgent.
 - Host text command endpoint that normalizes typed debug commands into the CoHostAgent workflow.
 - Lightweight signaling or session coordination for host-to-viewer browser media streaming.

@@ -692,6 +692,37 @@ Backend behavior:
 - Include SKU names and aliases as transcription vocabulary guidance when the selected model supports prompt guidance.
 - Return a clear `503` error when `OPENAI_API_KEY` is missing or the OpenAI client-secret request fails.
 - Never write the ephemeral client secret to the ledger.
+- For the local hackathon demo, backend OpenAI transcription setup calls may disable TLS certificate verification to avoid local CA-chain failures. This is a demo-only mode and must not be treated as production security posture.
+
+### `POST /events/realtime-transcription-offer`
+
+Exchanges a browser WebRTC SDP offer for an OpenAI Realtime SDP answer through the Python backend. The browser must not call OpenAI directly for transcription setup in the local demo path.
+
+Request:
+
+```json
+{
+  "sdp": "v=0..."
+}
+```
+
+Response:
+
+```json
+{
+  "answer_sdp": "v=0...",
+  "model": "gpt-4o-transcribe",
+  "session_id": "sess_..."
+}
+```
+
+Backend behavior:
+
+- Create a short-lived OpenAI Realtime transcription client secret server-side.
+- POST the browser SDP offer to OpenAI Realtime from the backend.
+- Disable TLS certificate verification for those backend OpenAI transcription setup calls in the local demo environment.
+- Return only the SDP answer and non-secret metadata to the browser.
+- Return a clear `503` error if the client-secret request or SDP exchange fails.
 
 Response:
 

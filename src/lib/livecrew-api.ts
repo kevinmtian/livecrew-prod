@@ -140,6 +140,12 @@ export type RealtimeTranscriptionToken = {
   model: string;
 };
 
+export type RealtimeTranscriptionOfferResponse = {
+  answer_sdp: string;
+  model: string;
+  session_id: string | null;
+};
+
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 export function getBackendUrl() {
@@ -203,6 +209,16 @@ export function createRealtimeTranscriptionToken() {
   return requestJson<RealtimeTranscriptionToken>("/events/realtime-transcription-token", {
     method: "POST",
   });
+}
+
+export function exchangeRealtimeTranscriptionOffer(sdp: string) {
+  return requestJson<RealtimeTranscriptionOfferResponse>(
+    "/events/realtime-transcription-offer",
+    {
+      method: "POST",
+      body: JSON.stringify({ sdp }),
+    },
+  );
 }
 
 export function approvePendingAction(pendingActionId: string) {
