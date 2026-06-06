@@ -104,6 +104,12 @@ class Order(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ViewerSession(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("viewer-session"))
+    username: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class LedgerEntry(BaseModel):
     id: str = Field(default_factory=lambda: create_id("ledger"))
     type: str
@@ -126,6 +132,7 @@ class CommerceState(BaseModel):
     active_sku_id: str | None = None
     skus: list[SKU]
     flash_sale: FlashSale | None = None
+    viewer_sessions: list[ViewerSession] = Field(default_factory=list)
     orders: list[Order] = Field(default_factory=list)
     pending_actions: list[PendingAction] = Field(default_factory=list)
     ledger: list[LedgerEntry] = Field(default_factory=list)
@@ -151,6 +158,15 @@ class TextEventRequest(BaseModel):
 class ViewerMessageRequest(BaseModel):
     viewer: str = "viewer"
     text: str
+
+
+class ViewerLoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=32)
+
+
+class ViewerLoginResponse(BaseModel):
+    session: ViewerSession
+    state: CommerceState
 
 
 class PendingReplyRequest(BaseModel):
@@ -210,6 +226,11 @@ class MediaSession(BaseModel):
     answer: dict[str, Any] | None = None
     host_candidates: list[dict[str, Any]] = Field(default_factory=list)
     viewer_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    viewer_offers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    viewer_answers: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    viewer_host_candidates: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    viewer_ice_candidates: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    viewer_ids: list[str] = Field(default_factory=list)
 
 
 class SessionCreateResponse(BaseModel):
@@ -219,3 +240,4 @@ class SessionCreateResponse(BaseModel):
 class SignalPayload(BaseModel):
     payload: dict[str, Any]
     role: Literal["host", "viewer"] = "host"
+    viewer_id: str | None = None

@@ -40,6 +40,36 @@ class MediaSignalStore:
             session.updated_at = utc_now()
             return session.model_copy(deep=True)
 
+    def set_viewer_offer(
+        self,
+        session_id: str,
+        viewer_id: str,
+        offer: dict,
+    ) -> MediaSession | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+            session.viewer_offers[viewer_id] = offer
+            session.viewer_answers.pop(viewer_id, None)
+            session.viewer_host_candidates[viewer_id] = []
+            session.viewer_ice_candidates[viewer_id] = []
+            session.status = "offer_ready"
+            session.updated_at = utc_now()
+            return session.model_copy(deep=True)
+
+    def add_viewer(self, session_id: str, viewer_id: str) -> MediaSession | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+            if viewer_id not in session.viewer_ids:
+                session.viewer_ids.append(viewer_id)
+                session.viewer_host_candidates.setdefault(viewer_id, [])
+                session.viewer_ice_candidates.setdefault(viewer_id, [])
+            session.updated_at = utc_now()
+            return session.model_copy(deep=True)
+
     def set_answer(self, session_id: str, answer: dict) -> MediaSession | None:
         with self._lock:
             session = self._sessions.get(session_id)
@@ -50,12 +80,37 @@ class MediaSignalStore:
             session.updated_at = utc_now()
             return session.model_copy(deep=True)
 
-    def add_candidate(self, session_id: str, role: str, candidate: dict) -> MediaSession | None:
+    def set_viewer_answer(
+        self,
+        session_id: str,
+        viewer_id: str,
+        answer: dict,
+    ) -> MediaSession | None:
         with self._lock:
             session = self._sessions.get(session_id)
             if not session:
                 return None
-            if role == "viewer":
+            session.viewer_answers[viewer_id] = answer
+            session.status = "answer_ready"
+            session.updated_at = utc_now()
+            return session.model_copy(deep=True)
+
+    def add_candidate(
+        self,
+        session_id: str,
+        role: str,
+        candidate: dict,
+        viewer_id: str | None = None,
+    ) -> MediaSession | None:
+        with self._lock:
+            session = self._sessions.get(session_id)
+            if not session:
+                return None
+            if viewer_id and role == "viewer":
+                session.viewer_ice_candidates.setdefault(viewer_id, []).append(candidate)
+            elif viewer_id:
+                session.viewer_host_candidates.setdefault(viewer_id, []).append(candidate)
+            elif role == "viewer":
                 session.viewer_candidates.append(candidate)
             else:
                 session.host_candidates.append(candidate)

@@ -12,9 +12,13 @@ import {
 } from "@/lib/local-room";
 import {
   type BackendState,
+  type ViewerSession,
   fetchBackendState,
   fetchLatestMediaSession,
   fetchMediaSession,
+  joinMediaSession,
+  loginViewer,
+  logoutViewer,
   postIceCandidate,
   postMediaAnswer,
   sendViewerMessage,
@@ -74,6 +78,10 @@ export default function ViewerPage() {
   const [now, setNow] = useState(() => Date.now());
   const [messageStatus, setMessageStatus] = useState<"idle" | "sending">("idle");
   const [messageError, setMessageError] = useState("");
+  const [viewerSession, setViewerSession] = useState<ViewerSession | null>(null);
+  const [loginInput, setLoginInput] = useState("");
+  const [loginStatus, setLoginStatus] = useState<"idle" | "submitting">("idle");
+  const [loginError, setLoginError] = useState("");
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
@@ -133,6 +141,9 @@ export default function ViewerPage() {
   }, []);
 
   const connectToLatestStream = useCallback(async () => {
+    if (!viewerSession) {
+      return;
+    }
     if (peerRef.current) {
       return;
     }
@@ -142,8 +153,31 @@ export default function ViewerPage() {
 
     try {
       const session = await fetchLatestMediaSession();
-      if (!session.offer || session.status === "stopped") {
+      if (session.status === "stopped") {
         setConnectionStatus("offline");
+        return;
+      }
+
+      await joinMediaSession(session.session_id, viewerSession.id);
+      let viewerOffer = session.viewer_offers?.[viewerSession.id] ?? null;
+      if (!viewerOffer) {
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 500));
+          const latest = await fetchMediaSession(session.session_id);
+          if (latest.status === "stopped") {
+            setConnectionStatus("offline");
+            return;
+          }
+          viewerOffer = latest.viewer_offers?.[viewerSession.id] ?? null;
+          if (viewerOffer) {
+            break;
+          }
+        }
+      }
+
+      if (!viewerOffer) {
+        setConnectionStatus("offline");
+        setStreamError("Host has not prepared a viewer stream yet. Tap Connect again.");
         return;
       }
 
@@ -173,14 +207,15 @@ export default function ViewerPage() {
             sessionIdRef.current,
             "viewer",
             event.candidate.toJSON(),
+            viewerSession.id,
           );
         }
       };
 
-      await peer.setRemoteDescription(session.offer);
+      await peer.setRemoteDescription(viewerOffer);
       const answer = await peer.createAnswer();
       await peer.setLocalDescription(answer);
-      await postMediaAnswer(session.session_id, answer);
+      await postMediaAnswer(session.session_id, answer, viewerSession.id);
 
       pollRef.current = window.setInterval(async () => {
         try {
@@ -193,10 +228,12 @@ export default function ViewerPage() {
             setConnectionStatus("offline");
             return;
           }
-          const newCandidates = latest.host_candidates.slice(
+          const hostCandidates =
+            latest.viewer_host_candidates?.[viewerSession.id] ?? [];
+          const newCandidates = hostCandidates.slice(
             hostCandidateCountRef.current,
           );
-          hostCandidateCountRef.current = latest.host_candidates.length;
+          hostCandidateCountRef.current = hostCandidates.length;
           for (const candidate of newCandidates) {
             await peerRef.current.addIceCandidate(candidate);
           }
@@ -216,9 +253,13 @@ export default function ViewerPage() {
           : "Unable to connect to host stream.",
       );
     }
-  }, [closeViewerPeer]);
+  }, [closeViewerPeer, viewerSession]);
 
   useEffect(() => {
+    if (!viewerSession) {
+      return;
+    }
+
     function syncRoomState() {
       setRoomState(readLocalRoomState());
     }
@@ -249,7 +290,20 @@ export default function ViewerPage() {
       }
       closeViewerPeer();
     };
-  }, [closeViewerPeer, connectToLatestStream, syncBackendState]);
+  }, [closeViewerPeer, connectToLatestStream, syncBackendState, viewerSession]);
+
+  useEffect(() => {
+    if (!viewerSession || !backendState) {
+      return;
+    }
+    const sessionStillActive = backendState.viewer_sessions.some(
+      (session) => session.id === viewerSession.id,
+    );
+    if (!sessionStillActive) {
+      setViewerSession(null);
+      closeViewerPeer();
+    }
+  }, [backendState, closeViewerPeer, viewerSession]);
 
   useEffect(() => {
     chatListRef.current?.scrollTo({
@@ -267,14 +321,22 @@ export default function ViewerPage() {
       return;
     }
 
-    appendViewerMessage(trimmedMessage, "You");
+    if (!viewerSession) {
+      setMessageError("Please log in before chatting.");
+      return;
+    }
+
+    appendViewerMessage(trimmedMessage, viewerSession.username);
     setRoomState(readLocalRoomState());
     setMessageInput("");
     setMessageStatus("sending");
     setMessageError("");
 
     try {
-      const response = await sendViewerMessage(trimmedMessage, "You");
+      const response = await sendViewerMessage(
+        trimmedMessage,
+        viewerSession.username,
+      );
       setBackendState(response.state);
       if (response.suggested_reply) {
         appendAgentReply(response.suggested_reply);
@@ -287,6 +349,88 @@ export default function ViewerPage() {
     } finally {
       setMessageStatus("idle");
     }
+  }
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const username = loginInput.trim();
+    if (!username) {
+      setLoginError("Username is required.");
+      return;
+    }
+
+    setLoginStatus("submitting");
+    setLoginError("");
+    try {
+      const response = await loginViewer(username);
+      setViewerSession(response.session);
+      setBackendState(response.state);
+      setLoginInput("");
+    } catch (error) {
+      setLoginError(
+        error instanceof Error ? error.message : "Viewer login failed.",
+      );
+    } finally {
+      setLoginStatus("idle");
+    }
+  }
+
+  async function handleLogout() {
+    if (!viewerSession) {
+      return;
+    }
+
+    const sessionId = viewerSession.id;
+    setViewerSession(null);
+    closeViewerPeer();
+    try {
+      await logoutViewer(sessionId);
+    } catch {
+      // The local session is already cleared; backend reset may have removed it.
+    }
+  }
+
+  if (!viewerSession) {
+    return (
+      <main className="flex min-h-dvh items-center justify-center bg-[#f7f8fa] px-4">
+        <form
+          className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+          onSubmit={handleLogin}
+        >
+          <p className="text-xs font-semibold uppercase tracking-wide text-teal-700">
+            LiveCrew Viewer
+          </p>
+          <h1 className="mt-2 text-xl font-semibold text-slate-950">
+            Enter the live room
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-slate-600">
+            Use a unique username for this demo room.
+          </p>
+          <label className="mt-5 block text-sm font-semibold text-slate-900">
+            Username
+            <input
+              className="mt-2 min-h-11 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none transition focus:border-teal-500 focus:bg-white"
+              disabled={loginStatus === "submitting"}
+              onChange={(event) => setLoginInput(event.target.value)}
+              placeholder="alice"
+              value={loginInput}
+            />
+          </label>
+          {loginError ? (
+            <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
+              {loginError}
+            </p>
+          ) : null}
+          <button
+            className="mt-4 min-h-11 w-full rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+            disabled={loginStatus === "submitting"}
+            type="submit"
+          >
+            {loginStatus === "submitting" ? "Entering" : "Enter room"}
+          </button>
+        </form>
+      </main>
+    );
   }
 
   return (
@@ -303,7 +447,7 @@ export default function ViewerPage() {
           <div className="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/65 to-transparent px-4 py-3 text-white">
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-white/70">
-                LiveCrew
+                {viewerSession.username}
               </p>
               <p className="text-sm font-semibold">Customer live room</p>
             </div>
@@ -316,6 +460,13 @@ export default function ViewerPage() {
               <span className="text-xs font-medium capitalize">
                 {connectionStatus}
               </span>
+              <button
+                className="rounded-md border border-white/20 px-2 py-1 text-xs font-semibold text-white/85 transition hover:bg-white/10"
+                onClick={() => void handleLogout()}
+                type="button"
+              >
+                Logout
+              </button>
             </div>
           </div>
 

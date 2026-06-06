@@ -241,6 +241,7 @@ class CommerceState(BaseModel):
     active_sku_id: str | None
     skus: list[SKU]
     flash_sale: FlashSale | None
+    viewer_sessions: list[ViewerSession]
     orders: list[Order]
     announcements: list[Announcement]
     pending_actions: list[PendingAction]
@@ -252,10 +253,12 @@ Important rules:
 
 - `active_sku_id` represents the product currently displayed in the live room.
 - SKU stock and prices are backend source of truth.
+- Viewer sessions store active username-only logins for the current demo run.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
 - Pending actions represent proposals waiting for host approval and must not change commerce state.
 - Reset restores SKUs to seeded stock and prices, then clears orders, flash sale, active SKU, announcements, pending actions, metrics, and ledger.
+- Reset clears viewer sessions so usernames can be reused in the next demo run.
 
 ## 7. Host Transcript and Text Commands as Action Stream
 
@@ -633,6 +636,10 @@ POST /events/host-command
 POST /events/viewer-message
 POST /events/realtime-transcription-token
 
+POST /viewer-login
+GET  /viewer-login/{session_id}
+POST /viewer-login/{session_id}/logout
+
 POST /commerce/flash-sale
 POST /commerce/announcement
 
@@ -644,6 +651,7 @@ GET  /report
 POST /api/eval/run-agent-suite
 
 POST /media/session
+POST /media/session/{session_id}/viewer/{viewer_id}
 POST /media/session/{session_id}/offer
 POST /media/session/{session_id}/answer
 POST /media/session/{session_id}/ice-candidate
@@ -751,6 +759,38 @@ class WorkflowResponse(BaseModel):
     state: CommerceState
 ```
 
+### Viewer Login Routes
+
+`POST /viewer-login`
+
+Request:
+
+```json
+{
+  "username": "alice"
+}
+```
+
+Response:
+
+```python
+class ViewerLoginResponse(BaseModel):
+    session: ViewerSession
+    state: CommerceState
+```
+
+Rules:
+
+- Username is trimmed before validation.
+- Username must be non-empty and short enough for the viewer UI.
+- Active usernames are compared case-insensitively.
+- If the username is already active, return `409 Conflict`.
+- Successful login stores a backend viewer session and appends a `viewer_logged_in` ledger event.
+
+`GET /viewer-login/{session_id}` returns the active viewer session for current-page validation, or `404` when the session is no longer valid. The browser should not persist this session across `/viewer` reloads; each new viewer entry should log in again to simulate multiple users on one device.
+
+`POST /viewer-login/{session_id}/logout` removes the viewer session, appends `viewer_logged_out`, and allows the username to be reused.
+
 ### `POST /actions/{pending_action_id}/approve`
 
 Accept a pending ConciergeAgent reply draft and send it to the viewer after guardrail validation.
@@ -830,6 +870,10 @@ Backend behavior:
 
 - `media_signaling.py` stores ephemeral session metadata only.
 - Media sessions should be resettable and should expire when the host stops streaming or refreshes for too long.
+- A media session supports multiple viewers by `viewer_id`. Each viewer receives its own WebRTC offer from the host, submits its own answer, and exchanges ICE candidates in viewer-scoped candidate lists.
+- The host creates one `RTCPeerConnection` per active viewer because a single peer connection cannot serve multiple independent viewer answers.
+- `POST /media/session/{session_id}/viewer/{viewer_id}` registers a viewer as waiting for a viewer-scoped offer.
+- `SignalPayload.viewer_id` scopes offer, answer, and ICE candidate payloads to a specific viewer when present. Legacy unscoped fields may remain for compatibility but should not be used for multi-viewer playback.
 - Media state changes may broadcast lightweight realtime events such as `host_stream_started` and `host_stream_stopped`.
 - Media failures should not block commerce state, viewer chat, product shelf updates, or agent workflows.
 
@@ -906,6 +950,8 @@ list_product
 price_updated
 price_restored
 answer_suggested
+viewer_logged_in
+viewer_logged_out
 guardrail_block
 host_escalation
 host_confirmation_requested

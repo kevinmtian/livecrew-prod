@@ -312,6 +312,30 @@ Acceptance criteria:
 - Changing the active SKU from `/host` updates the product information shown over the livestream area.
 - The chat panel remains usable without overlapping the product overlay.
 
+### FR-0D: Viewer Username Login
+
+The viewer room should require a simple username login before a viewer can watch or interact with the livestream.
+
+Expected behavior:
+
+- Accessing `/viewer` without a valid viewer session should show a username login screen by default.
+- The viewer should be able to log in with a username only; no password or external identity provider is required for the hackathon demo.
+- The Python backend should store active viewer usernames for the current demo session.
+- A username that is already active in backend state must not be allowed to log in again from another viewer session.
+- Login should return a backend viewer session id and username.
+- The browser should not persist the viewer session for automatic reuse; each new `/viewer` entry, tab, or refresh should show login again so the demo can simulate multiple users on one device.
+- If the current in-memory session no longer exists on the backend, `/viewer` should return to the login screen.
+- Logged-in usernames should be used for viewer chat and commerce actions instead of a generic local `"You"` label.
+- Reset should clear active viewer sessions.
+
+Acceptance criteria:
+
+- Opening `/viewer` with no stored valid session shows the login form, not the livestream room.
+- A viewer can enter a unique username and then enter the livestream room.
+- A second viewer cannot log in with the same active username.
+- Refreshing or reopening `/viewer` requires logging in again, even on the same device.
+- Clearing backend state invalidates stored viewer sessions and requires login again.
+
 ### FR-1: Detect Product Mentions and List SKU
 
 When the host mentions a product during the livestream, the backend should identify the matching SKU and cause the frontend product shelf to list or highlight that SKU.
