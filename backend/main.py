@@ -218,21 +218,23 @@ def monitor_signal(request: MonitorSignalRequest):
 
 @app.get("/metrics/live", response_model=MonitorSignalRequest)
 def live_metrics():
-    return live_metrics_store.snapshot()
+    return live_metrics_store.snapshot(commerce_store.get().orders)
 
 
 @app.post("/metrics/viewer-heartbeat", response_model=MonitorSignalRequest)
 def viewer_heartbeat(request: ViewerHeartbeatRequest):
-    return live_metrics_store.record_viewer_heartbeat(request.session_id)
+    live_metrics_store.record_viewer_heartbeat(request.session_id)
+    return live_metrics_store.snapshot(commerce_store.get().orders)
 
 
 @app.post("/metrics/viewer-event", response_model=MonitorSignalRequest)
 def viewer_metric_event(request: ViewerMetricEventRequest):
-    return live_metrics_store.record_viewer_event(
+    live_metrics_store.record_viewer_event(
         request.session_id,
         request.event_type,
         request.text,
     )
+    return live_metrics_store.snapshot(commerce_store.get().orders)
 
 
 @app.get("/debug/cohost-messages", response_model=CoHostDebugMessagesResponse)

@@ -8,7 +8,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from backend.models import MonitorSignalRequest, utc_now
+from backend.models import MonitorSignalRequest, Order, utc_now
 from backend.openai_client import get_openai_client
 
 
@@ -83,7 +83,7 @@ class LiveMetricsStore:
                 self._order_events.append(now)
             return self.snapshot()
 
-    def snapshot(self) -> MonitorSignalRequest:
+    def snapshot(self, orders: list[Order] | None = None) -> MonitorSignalRequest:
         now = utc_now().timestamp()
         active_cutoff = now - 15
         recent_cutoff = now - 60
@@ -96,7 +96,19 @@ class LiveMetricsStore:
 
         online_viewers = len(active_viewers)
         recent_interactions = len([ts for ts in self._interaction_events if ts >= recent_cutoff])
-        recent_orders = len([ts for ts in self._order_events if ts >= recent_cutoff])
+        if orders is None:
+            recent_order_count = len([ts for ts in self._order_events if ts >= recent_cutoff])
+            recent_order_revenue_cents = 0
+        else:
+            recent_real_orders = [
+                order
+                for order in orders
+                if order.created_at.timestamp() >= recent_cutoff
+            ]
+            recent_order_count = len(recent_real_orders)
+            recent_order_revenue_cents = sum(
+                order.quantity * order.unit_price_cents for order in recent_real_orders
+            )
         recent_sentiments = [
             score for ts, score in self._sentiment_events if ts >= recent_cutoff
         ]
@@ -114,8 +126,8 @@ class LiveMetricsStore:
         interaction_rate = (
             (recent_interactions / online_viewers) * 100 if online_viewers else 0.0
         )
-        conversion_rate = (recent_orders / online_viewers) * 100 if online_viewers else 0.0
-        gpm_cents = int(recent_orders * 2990 + recent_interactions * 120)
+        conversion_rate = (recent_order_count / online_viewers) * 100 if online_viewers else 0.0
+        gpm_cents = recent_order_revenue_cents
 
         online_delta = self._delta_percent(online_viewers, self._last_online_viewers)
         gpm_delta = self._delta_percent(gpm_cents, self._last_gpm_cents)

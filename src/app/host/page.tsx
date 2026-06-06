@@ -22,6 +22,7 @@ import {
 import {
   type BackendState,
   type CoHostDebugMessage,
+  type MonitorSignalPayload,
   type PendingAction,
   type WorkflowResponse,
   approvePendingAction,
@@ -29,6 +30,7 @@ import {
   exchangeRealtimeTranscriptionOffer,
   fetchBackendState,
   fetchCoHostDebugMessages,
+  fetchLiveMetrics,
   fetchMediaSession,
   getBackendUrl,
   postIceCandidate,
@@ -157,6 +159,41 @@ function splitTopChatIntents(value: string | undefined) {
     .map((intent) => intent.trim())
     .filter(Boolean)
     .slice(0, 3);
+}
+
+function formatHostLiveMetric(
+  metrics: MonitorSignalPayload | null,
+  key:
+    | "online_viewers"
+    | "gpm"
+    | "conversion_rate"
+    | "high_intent_density"
+    | "question_backlog"
+    | "interaction_rate",
+  fallback: string | undefined,
+) {
+  if (!metrics) {
+    return fallback ?? "-";
+  }
+
+  if (key === "online_viewers") {
+    return `${metrics.online_viewers.toLocaleString()} (${metrics.online_viewers_delta.toFixed(1)}%)`;
+  }
+  if (key === "gpm") {
+    return `$${Math.round(metrics.gpm_cents / 100)} (${metrics.gpm_delta.toFixed(1)}%)`;
+  }
+  if (key === "conversion_rate") {
+    return `${metrics.conversion_rate.toFixed(1)}% (${metrics.conversion_rate_delta.toFixed(1)}%)`;
+  }
+  if (key === "high_intent_density") {
+    return `${metrics.high_intent_density.toFixed(0)}/min`;
+  }
+  if (key === "question_backlog") {
+    return metrics.top_question && metrics.top_question_count > 0
+      ? `${metrics.top_question_count}x ${metrics.top_question}`
+      : "none";
+  }
+  return `${metrics.interaction_rate.toFixed(1)}%`;
 }
 
 function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
@@ -804,6 +841,8 @@ export default function HostPage() {
   const [ledgerEvents, setLedgerEvents] = useState<LedgerEvent[]>(initialLedger);
   const [roomState, setRoomState] =
     useState<LocalRoomState>(defaultLocalRoomState);
+  const [hostLiveMetrics, setHostLiveMetrics] =
+    useState<MonitorSignalPayload | null>(null);
   const [replyInput, setReplyInput] = useState("");
   const [stockInput, setStockInput] = useState(
     String(getActiveSkuDisplay(defaultActiveSkuId).stock),
@@ -899,13 +938,18 @@ export default function HostPage() {
 
     syncRoomState();
     void syncBackendState();
+    void syncLiveMetrics();
     const unsubscribe = subscribeToLocalRoom(syncRoomState);
     const backendPollId = window.setInterval(() => {
       void syncBackendState();
     }, 3000);
+    const metricsPollId = window.setInterval(() => {
+      void syncLiveMetrics();
+    }, 3000);
 
     return () => {
       window.clearInterval(backendPollId);
+      window.clearInterval(metricsPollId);
       if (answerPollRef.current) {
         window.clearInterval(answerPollRef.current);
       }
@@ -929,6 +973,15 @@ export default function HostPage() {
       }
     } catch {
       setBackendStatus("offline");
+    }
+  }
+
+  async function syncLiveMetrics() {
+    try {
+      const metrics = await fetchLiveMetrics();
+      setHostLiveMetrics(metrics);
+    } catch {
+      setHostLiveMetrics(null);
     }
   }
 
@@ -1939,12 +1992,54 @@ export default function HostPage() {
                 </div>
                 <div className="mb-4 grid grid-cols-2 gap-2">
                   {[
-                    ["Viewers", roomState.monitorSignal.signals.online_viewers],
-                    ["GPM", roomState.monitorSignal.signals.gpm],
-                    ["Conversion", roomState.monitorSignal.signals.conversion_rate],
-                    ["High intent", roomState.monitorSignal.signals.high_intent_density],
-                    ["Backlog", roomState.monitorSignal.signals.question_backlog],
-                    ["Interaction", roomState.monitorSignal.signals.interaction_rate],
+                    [
+                      "Viewers",
+                      formatHostLiveMetric(
+                        hostLiveMetrics,
+                        "online_viewers",
+                        roomState.monitorSignal.signals.online_viewers,
+                      ),
+                    ],
+                    [
+                      "GPM",
+                      formatHostLiveMetric(
+                        hostLiveMetrics,
+                        "gpm",
+                        roomState.monitorSignal.signals.gpm,
+                      ),
+                    ],
+                    [
+                      "Conversion",
+                      formatHostLiveMetric(
+                        hostLiveMetrics,
+                        "conversion_rate",
+                        roomState.monitorSignal.signals.conversion_rate,
+                      ),
+                    ],
+                    [
+                      "High intent",
+                      formatHostLiveMetric(
+                        hostLiveMetrics,
+                        "high_intent_density",
+                        roomState.monitorSignal.signals.high_intent_density,
+                      ),
+                    ],
+                    [
+                      "Backlog",
+                      formatHostLiveMetric(
+                        hostLiveMetrics,
+                        "question_backlog",
+                        roomState.monitorSignal.signals.question_backlog,
+                      ),
+                    ],
+                    [
+                      "Interaction",
+                      formatHostLiveMetric(
+                        hostLiveMetrics,
+                        "interaction_rate",
+                        roomState.monitorSignal.signals.interaction_rate,
+                      ),
+                    ],
                     ["Source", roomState.monitorSignal.signals.analysis_source],
                   ].map(([label, value]) => (
                     <div
