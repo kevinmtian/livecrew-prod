@@ -52,8 +52,46 @@ const initialReplies: RoomReply[] = [
   },
 ];
 
+const skuImages: Record<string, { src: string; alt: string }> = {
+  "glowfix-vitamin-c-serum": {
+    src: "https://images.unsplash.com/photo-1723951174326-2a97221d3b7f?auto=format&fit=crop&q=70&w=240&h=240",
+    alt: "Vitamin C serum bottle on citrus slices",
+  },
+  "hydramist-cushion-spf": {
+    src: "https://images.unsplash.com/photo-1768369712397-f1a9fa19ea27?auto=format&fit=crop&q=70&w=240&h=240",
+    alt: "Compact cushion foundation product",
+  },
+  "bamboo-thermal-tumbler": {
+    src: "https://images.unsplash.com/photo-1561180796-dbaa5caf76e0?auto=format&fit=crop&q=70&w=240&h=240",
+    alt: "Blue reusable tumbler bottle",
+  },
+  "satin-cloud-sleep-mask": {
+    src: "https://images.unsplash.com/photo-1742794565428-1a74fa73f1c9?auto=format&fit=crop&q=70&w=240&h=240",
+    alt: "Satin sleep mask on bedding",
+  },
+};
+
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
+}
+
+function CartIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="2"
+      viewBox="0 0 24 24"
+    >
+      <path d="M6 6h15l-1.5 8.5a2 2 0 0 1-2 1.5H9a2 2 0 0 1-2-1.6L5 3H2" />
+      <circle cx="9" cy="20" r="1" />
+      <circle cx="18" cy="20" r="1" />
+    </svg>
+  );
 }
 
 function getFlashSaleSecondsLeft(
@@ -84,6 +122,10 @@ export default function ViewerPage() {
   const [loginInput, setLoginInput] = useState("");
   const [loginStatus, setLoginStatus] = useState<"idle" | "submitting">("idle");
   const [loginError, setLoginError] = useState("");
+  const [cartOpen, setCartOpen] = useState(false);
+  const [cartItems, setCartItems] = useState<Record<string, number>>({});
+  const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState(false);
+  const [checkoutStatus, setCheckoutStatus] = useState<"idle" | "submitting">("idle");
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
@@ -119,6 +161,48 @@ export default function ViewerPage() {
     Boolean(activeFlashSale) &&
     flashSaleSecondsLeft > 0 &&
     (activeFlashSale?.remaining_stock ?? 0) > 0;
+  const currentUnitPrice = isFlashSaleActive && activeFlashSale
+    ? activeFlashSale.sale_price_cents
+    : activeBackendSku?.price_cents;
+  const getSkuUnitPriceCents = (sku: { id: string; price_cents: number }) =>
+    isFlashSaleActive && activeFlashSale?.sku_id === sku.id
+      ? activeFlashSale.sale_price_cents
+      : sku.price_cents;
+  const productShelf = backendState?.skus.length
+    ? [
+        ...backendState.skus.filter((sku) => sku.id === backendActiveSkuId),
+        ...backendState.skus.filter((sku) => sku.id !== backendActiveSkuId),
+      ]
+    : activeBackendSku
+      ? [activeBackendSku]
+      : [
+          {
+            id: fallbackProduct.id,
+            name: fallbackProduct.name,
+            aliases: fallbackProduct.aliases,
+            price_cents: currentUnitPrice ?? 0,
+            stock: fallbackProduct.stock,
+            facts: fallbackProduct.facts,
+            base_price_cents: currentUnitPrice ?? 0,
+          },
+        ];
+  const cartCount = Object.values(cartItems).reduce(
+    (total, quantity) => total + quantity,
+    0,
+  );
+  const cartTotalCents = productShelf.reduce((total, sku) => {
+    const quantity = cartItems[sku.id] ?? 0;
+    const unitPrice = getSkuUnitPriceCents(sku);
+    return total + quantity * unitPrice;
+  }, 0);
+  const cartTotal = cartTotalCents > 0 ? formatPrice(cartTotalCents) : null;
+  const checkoutLines = productShelf
+    .map((sku) => ({
+      sku,
+      quantity: cartItems[sku.id] ?? 0,
+      unitPriceCents: getSkuUnitPriceCents(sku),
+    }))
+    .filter((item) => item.quantity > 0);
   const liveRoomMessages = [...roomState.viewerMessages, ...roomState.replies].sort(
     (firstMessage, secondMessage) => firstMessage.createdAt - secondMessage.createdAt,
   );
@@ -376,6 +460,47 @@ export default function ViewerPage() {
     }
   }
 
+  async function handleCheckout() {
+    if (!viewerSession || cartCount <= 0) {
+      return;
+    }
+
+    const orderLines = checkoutLines;
+    setMessageError("");
+    setCheckoutStatus("submitting");
+
+    try {
+      let latestBackendState: BackendState | null = null;
+      for (const item of orderLines) {
+        const orderText = `I want to order ${item.quantity} x ${item.sku.name}.`;
+        const response = await sendViewerMessage(orderText, viewerSession.username);
+        latestBackendState = response.state;
+        if (viewerSessionIdRef.current) {
+          void sendViewerMetricEvent(
+            viewerSessionIdRef.current,
+            "order",
+            orderText,
+          ).catch(() => {});
+        }
+      }
+      if (latestBackendState) {
+        setBackendState(latestBackendState);
+      }
+      setCartItems({});
+      setCartOpen(false);
+      setCheckoutConfirmOpen(false);
+      if (viewerSessionIdRef.current) {
+        void syncBackendState();
+      }
+    } catch (error) {
+      setMessageError(
+        error instanceof Error ? error.message : "Checkout failed.",
+      );
+    } finally {
+      setCheckoutStatus("idle");
+    }
+  }
+
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const username = loginInput.trim();
@@ -568,6 +693,140 @@ export default function ViewerPage() {
                 </div>
               </div>
             ) : null}
+            <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)] gap-2">
+              <button
+                className="relative flex min-h-10 items-center justify-center gap-2 rounded-md border border-slate-200 bg-slate-950 px-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:bg-slate-300"
+                onClick={() => setCartOpen((isOpen) => !isOpen)}
+                type="button"
+              >
+                <CartIcon />
+                Cart
+                {cartCount > 0 ? (
+                  <span className="absolute -right-2 -top-2 min-w-5 rounded-full bg-rose-600 px-1.5 py-0.5 text-center text-[11px] leading-none text-white">
+                    {cartCount}
+                  </span>
+                ) : null}
+              </button>
+              <button
+                className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                disabled={cartCount <= 0 || checkoutStatus === "submitting"}
+                onClick={() => setCheckoutConfirmOpen(true)}
+                type="button"
+              >
+                {cartTotal ? `Checkout ${cartTotal}` : "Checkout"}
+              </button>
+            </div>
+            {cartOpen ? (
+              <div className="mt-2 max-h-52 overflow-y-auto rounded-md border border-slate-200 bg-white p-2">
+                <div className="mb-2 flex items-center justify-between px-1">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Product cart
+                  </p>
+                  {cartCount > 0 ? (
+                    <button
+                      className="text-xs font-semibold text-teal-800 underline-offset-2 hover:underline"
+                      onClick={() => setCartItems({})}
+                      type="button"
+                    >
+                      Clear
+                    </button>
+                  ) : null}
+                </div>
+                <div className="space-y-2">
+                  {productShelf.map((sku) => {
+                    const quantity = cartItems[sku.id] ?? 0;
+                    const skuFlashSale =
+                      isFlashSaleActive && activeFlashSale?.sku_id === sku.id
+                        ? activeFlashSale
+                        : null;
+                    const priceCents = getSkuUnitPriceCents(sku);
+                    const stockLimit = skuFlashSale?.remaining_stock ?? sku.stock;
+                    const isActiveSku = sku.id === backendActiveSkuId;
+                    const image = skuImages[sku.id];
+
+                    return (
+                      <div
+                        className="grid grid-cols-[3.5rem_minmax(0,1fr)_auto] items-center gap-2 rounded-md border border-slate-100 bg-slate-50 p-2"
+                        key={sku.id}
+                      >
+                        <div className="h-14 w-14 overflow-hidden rounded-md bg-slate-200">
+                          {image ? (
+                            <img
+                              alt={image.alt}
+                              className="h-full w-full object-cover"
+                              src={image.src}
+                            />
+                          ) : null}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <p className="truncate text-sm font-semibold text-slate-950">
+                              {sku.name}
+                            </p>
+                            {isActiveSku ? (
+                              <span className="shrink-0 rounded-sm bg-rose-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-rose-700">
+                                Live now
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="mt-1 text-xs text-slate-500">
+                            {formatPrice(priceCents)} · {stockLimit} left
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            className="flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-sm font-bold text-slate-700 disabled:text-slate-300"
+                            disabled={quantity <= 0}
+                            onClick={() =>
+                              setCartItems((current) => ({
+                                ...current,
+                                [sku.id]: Math.max((current[sku.id] ?? 0) - 1, 0),
+                              }))
+                            }
+                            type="button"
+                          >
+                            -
+                          </button>
+                          <span className="w-6 text-center text-sm font-semibold text-slate-950">
+                            {quantity}
+                          </span>
+                          <button
+                            className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-950 text-sm font-bold text-white disabled:bg-slate-300"
+                            disabled={quantity >= stockLimit || stockLimit <= 0}
+                            onClick={() =>
+                              setCartItems((current) => ({
+                                ...current,
+                                [sku.id]: Math.min(
+                                  (current[sku.id] ?? 0) + 1,
+                                  stockLimit,
+                                ),
+                              }))
+                            }
+                            type="button"
+                          >
+                            +
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+            {cartCount > 0 ? (
+              <div className="mt-2 flex items-center justify-between rounded-md border border-teal-100 bg-teal-50 px-3 py-2 text-xs text-teal-900">
+                <span className="font-semibold">
+                  Cart: {cartCount} item{cartCount === 1 ? "" : "s"}
+                </span>
+                <button
+                  className="font-semibold text-teal-800 underline-offset-2 hover:underline"
+                  onClick={() => setCartOpen(true)}
+                  type="button"
+                >
+                  Edit
+                </button>
+              </div>
+            ) : null}
           </div>
         </section>
 
@@ -677,6 +936,80 @@ export default function ViewerPage() {
           ) : null}
         </section>
       </div>
+      {checkoutConfirmOpen ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-3 sm:items-center">
+          <div className="w-full max-w-[400px] rounded-lg border border-slate-200 bg-white p-4 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-base font-semibold text-slate-950">
+                  Confirm order
+                </p>
+                <p className="mt-1 text-sm text-slate-500">
+                  Review price and quantity before checkout.
+                </p>
+              </div>
+              <button
+                className="rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                disabled={checkoutStatus === "submitting"}
+                onClick={() => setCheckoutConfirmOpen(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <div className="mt-4 space-y-2">
+              {checkoutLines.map((item) => {
+                const image = skuImages[item.sku.id];
+                return (
+                  <div
+                    className="grid grid-cols-[3rem_minmax(0,1fr)_auto] items-center gap-3 rounded-md border border-slate-100 bg-slate-50 p-2"
+                    key={item.sku.id}
+                  >
+                    <div className="h-12 w-12 overflow-hidden rounded-md bg-slate-200">
+                      {image ? (
+                        <img
+                          alt={image.alt}
+                          className="h-full w-full object-cover"
+                          src={image.src}
+                        />
+                      ) : null}
+                    </div>
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-950">
+                        {item.sku.name}
+                      </p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {formatPrice(item.unitPriceCents)} x {item.quantity}
+                      </p>
+                    </div>
+                    <p className="text-sm font-semibold text-slate-950">
+                      {formatPrice(item.unitPriceCents * item.quantity)}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Total
+                </p>
+                <p className="mt-1 text-xl font-bold text-slate-950">
+                  {cartTotal ?? "$0.00"}
+                </p>
+              </div>
+              <button
+                className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                disabled={checkoutStatus === "submitting" || checkoutLines.length === 0}
+                onClick={() => void handleCheckout()}
+                type="button"
+              >
+                {checkoutStatus === "submitting" ? "Placing order" : "Place order"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }
