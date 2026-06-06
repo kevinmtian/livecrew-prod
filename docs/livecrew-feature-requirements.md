@@ -515,6 +515,59 @@ Acceptance criteria:
 - Replies reference current backend price and promotion state when relevant.
 - The event ledger records suggested replies and blocked claims.
 
+### FR-5A: Viewer Comment Monitoring and Host Word Cloud
+
+During the livestream, LiveCrew should monitor viewer comments and give the host a compact view of recent demand. Every minute, the host cockpit should request an AI-assisted summary of the past three minutes of viewer comments and render it as a word cloud with grounded reply suggestions.
+
+Expected behavior:
+
+- Viewer messages submitted from `/viewer` should be recorded in backend state with viewer name, text, timestamp, resolved SKU when available, and ConciergeAgent suggested reply when one can be safely drafted.
+- ConciergeAgent should resolve SKU by explicit product mention first, then by the current active SKU for contextual comments such as "this one".
+- Suggested replies must cite only seeded SKU facts, current backend price, stock, and active flash-sale state.
+- Unsupported discounts, medical guarantees, delivery promises, authenticity claims, and unsafe claims should be handled with safe wording or host escalation instead of invented promises.
+- The host cockpit should show recent backend viewer comments, per-message AI draft replies, and controls to use a draft reply or ignore it.
+- Once per minute, the host cockpit should call the backend to summarize comments from the previous three minutes.
+- The word cloud should group repeated viewer language and product-specific themes into weighted terms.
+- The word cloud snapshot should include source comment count, time window, active SKU context, short summary, and suggested host talking points or replies.
+- If OpenAI is unavailable, the backend should generate a deterministic fallback word cloud from comment terms and SKU aliases.
+- Reset should clear stored viewer comments and word cloud snapshots.
+
+Acceptance criteria:
+
+- Sending messages from `/viewer` updates backend `viewer_comments` and they appear in `/host` without page refresh after polling.
+- Product questions produce grounded `suggest_reply` actions and suggested reply text tied to the active or explicitly mentioned SKU.
+- A host can click a suggested reply from the monitoring panel and send it through the existing host reply flow.
+- The host cockpit refreshes the three-minute word cloud every minute and also provides a manual refresh for demo testing.
+- The word cloud never exposes the OpenAI API key and does not call OpenAI from the browser.
+- Unsupported claims or discount requests do not produce invented commercial promises.
+
+### FR-5B: Viewer Purchase Confirmation and Host Checkout Nudges
+
+Viewers should be able to buy the currently displayed product from the mobile live room. The purchase flow should protect stock accuracy and give the host a chance to encourage viewers who are hesitating at checkout.
+
+Expected behavior:
+
+- The viewer room should show a purchase control for the currently active SKU.
+- Clicking purchase should open a confirmation modal instead of immediately creating an order.
+- The modal should show product name, current backend price, selected quantity, total price, and current available quantity.
+- Quantity must be a positive integer and must not exceed the currently available purchasable quantity.
+- Current price should come from backend commerce state: use active flash-sale price when the flash sale is active and has remaining sale stock; otherwise use the SKU current price.
+- Opening the modal should create a backend `checkout_intent` with status `pending`.
+- Confirming the modal should create a backend order, reduce SKU stock, reduce flash-sale remaining stock when applicable, close the modal, and append ledger events.
+- Cancelling or closing the modal should mark the backend checkout intent as `cancelled`.
+- If stock changes while the modal is open, confirmation should revalidate stock and fail gracefully instead of overselling.
+- The host cockpit should surface a nudge when one or more unique viewers have pending checkout intents older than five seconds.
+- The nudge should show the number of hesitant viewers and a short product breakdown so the host can encourage them verbally.
+
+Acceptance criteria:
+
+- A viewer can start checkout for the active product and sees a confirmation modal.
+- The modal prevents selecting a quantity greater than the currently available quantity.
+- Confirming checkout creates an order using the backend current price and updates backend stock.
+- Flash-sale purchases use sale price only while sale stock is available.
+- Host sees a checkout nudge after a viewer remains in the modal for at least five seconds without confirming.
+- Confirmed or cancelled checkout intents no longer count toward the host nudge.
+
 ### FR-6: Generate Post-Stream Review Document
 
 After the livestream, the system should automatically generate a post-stream review document based on backend commerce records and the event ledger.

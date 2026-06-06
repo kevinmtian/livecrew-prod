@@ -2,15 +2,165 @@ from __future__ import annotations
 
 from backend.models import (
     AppliedAction,
+    CheckoutIntent,
     CommerceState,
     FlashSale,
     LedgerEntry,
+    Order,
     PendingAction,
     ProposedAction,
     GuardrailResult,
+    utc_now,
 )
 from backend.policies.guardrails import validate_action
 from backend.tools.sku_resolver import get_sku_by_id
+
+
+def _is_flash_sale_active(state: CommerceState, sku_id: str) -> bool:
+    sale = state.flash_sale
+    if not sale or sale.sku_id != sku_id:
+        return False
+    elapsed_seconds = (utc_now() - sale.created_at).total_seconds()
+    return elapsed_seconds <= sale.duration_seconds and sale.remaining_stock > 0
+
+
+def get_purchase_terms(
+    state: CommerceState,
+    sku_id: str,
+) -> tuple[int, int]:
+    sku = get_sku_by_id(sku_id, state.skus)
+    if not sku:
+        return 0, 0
+
+    if _is_flash_sale_active(state, sku_id) and state.flash_sale:
+        return state.flash_sale.sale_price_cents, min(sku.stock, state.flash_sale.remaining_stock)
+
+    return sku.price_cents, sku.stock
+
+
+def create_checkout_intent(
+    state: CommerceState,
+    viewer: str,
+    sku_id: str,
+    quantity: int,
+) -> tuple[CheckoutIntent, LedgerEntry]:
+    sku = get_sku_by_id(sku_id, state.skus)
+    if not sku:
+        raise ValueError("Product is not available.")
+    if quantity < 1:
+        raise ValueError("Quantity must be at least 1.")
+
+    unit_price_cents, available_quantity = get_purchase_terms(state, sku_id)
+    if quantity > available_quantity:
+        raise ValueError(f"Only {available_quantity} unit(s) are available.")
+
+    intent = CheckoutIntent(
+        viewer=viewer,
+        sku_id=sku_id,
+        quantity=quantity,
+        unit_price_cents=unit_price_cents,
+        total_price_cents=unit_price_cents * quantity,
+    )
+    state.checkout_intents = [intent, *state.checkout_intents][:200]
+    return intent, LedgerEntry(
+        type="checkout_intent_started",
+        detail=f"{viewer} opened checkout for {quantity} x {sku.name}.",
+        payload={
+            "checkout_intent_id": intent.id,
+            "viewer": viewer,
+            "sku_id": sku_id,
+            "quantity": quantity,
+            "unit_price_cents": unit_price_cents,
+            "available_quantity": available_quantity,
+        },
+    )
+
+
+def _find_pending_checkout_intent(
+    state: CommerceState,
+    checkout_intent_id: str,
+) -> CheckoutIntent | None:
+    return next(
+        (
+            intent
+            for intent in state.checkout_intents
+            if intent.id == checkout_intent_id and intent.status == "pending"
+        ),
+        None,
+    )
+
+
+def confirm_checkout_intent(
+    state: CommerceState,
+    checkout_intent_id: str,
+) -> tuple[Order, list[LedgerEntry]]:
+    intent = _find_pending_checkout_intent(state, checkout_intent_id)
+    if not intent:
+        raise ValueError("Pending checkout intent was not found.")
+
+    sku = get_sku_by_id(intent.sku_id, state.skus)
+    if not sku:
+        raise ValueError("Product is no longer available.")
+
+    unit_price_cents, available_quantity = get_purchase_terms(state, intent.sku_id)
+    if intent.quantity > available_quantity:
+        raise ValueError(f"Only {available_quantity} unit(s) are available.")
+
+    sku.stock -= intent.quantity
+    if _is_flash_sale_active(state, intent.sku_id) and state.flash_sale:
+        state.flash_sale.remaining_stock -= intent.quantity
+
+    intent.status = "confirmed"
+    intent.unit_price_cents = unit_price_cents
+    intent.total_price_cents = unit_price_cents * intent.quantity
+    intent.updated_at = utc_now()
+
+    order = Order(
+        viewer=intent.viewer,
+        sku_id=intent.sku_id,
+        quantity=intent.quantity,
+        unit_price_cents=unit_price_cents,
+        total_price_cents=unit_price_cents * intent.quantity,
+        checkout_intent_id=intent.id,
+    )
+    state.orders = [order, *state.orders][:200]
+    return order, [
+        LedgerEntry(
+            type="order_created",
+            detail=f"{intent.viewer} ordered {intent.quantity} x {sku.name}.",
+            payload={
+                "order_id": order.id,
+                "checkout_intent_id": intent.id,
+                "viewer": intent.viewer,
+                "sku_id": intent.sku_id,
+                "quantity": intent.quantity,
+                "unit_price_cents": unit_price_cents,
+                "total_price_cents": order.total_price_cents,
+            },
+        ),
+        LedgerEntry(
+            type="checkout_intent_confirmed",
+            detail=f"{intent.viewer} confirmed checkout.",
+            payload={"checkout_intent_id": intent.id, "order_id": order.id},
+        ),
+    ]
+
+
+def cancel_checkout_intent(
+    state: CommerceState,
+    checkout_intent_id: str,
+) -> tuple[CheckoutIntent, LedgerEntry]:
+    intent = _find_pending_checkout_intent(state, checkout_intent_id)
+    if not intent:
+        raise ValueError("Pending checkout intent was not found.")
+
+    intent.status = "cancelled"
+    intent.updated_at = utc_now()
+    return intent, LedgerEntry(
+        type="checkout_intent_cancelled",
+        detail=f"{intent.viewer} cancelled checkout.",
+        payload={"checkout_intent_id": intent.id, "viewer": intent.viewer},
+    )
 
 
 def apply_action(
@@ -126,6 +276,22 @@ def apply_action(
         return (
             AppliedAction(type=action.type, sku_id=action.sku_id, detail=detail),
             LedgerEntry(type="flash_sale_cancelled", detail=detail, source_text=action.source_text),
+        )
+
+    if action.type == "suggest_reply":
+        detail = "ConciergeAgent drafted a grounded viewer reply."
+        return (
+            AppliedAction(type=action.type, sku_id=action.sku_id, detail=detail),
+            LedgerEntry(
+                type="answer_suggested",
+                detail=detail,
+                source_text=action.source_text,
+                payload={
+                    "sku_id": action.sku_id,
+                    "reply_text": action.reply_text,
+                    "evidence": action.evidence,
+                },
+            ),
         )
 
     return None, LedgerEntry(

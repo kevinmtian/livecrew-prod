@@ -20,12 +20,16 @@ import {
 } from "@/lib/local-room";
 import {
   type BackendState,
+  type CheckoutIntent,
   type PendingAction,
+  type ViewerComment,
+  type ViewerInsightSnapshot,
   type WorkflowResponse,
   approvePendingAction,
   createMediaSession,
   fetchBackendState,
   fetchMediaSession,
+  generateViewerWordCloud,
   getBackendUrl,
   postIceCandidate,
   postMediaOffer,
@@ -36,7 +40,7 @@ import {
   stopMediaSession,
 } from "@/lib/livecrew-api";
 import { mockChat } from "@/lib/mock-data";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type LedgerEvent = {
   id: string;
@@ -162,6 +166,114 @@ function describePendingAction(pending: PendingAction, state: BackendState | nul
   return details.join(" · ");
 }
 
+function formatCommentTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function ViewerCommentCard({
+  comment,
+  ignored,
+  onIgnore,
+  onUseReply,
+}: {
+  comment: ViewerComment;
+  ignored: boolean;
+  onIgnore: () => void;
+  onUseReply: (reply: string) => void;
+}) {
+  const statusTone =
+    comment.reply_status === "blocked" || comment.reply_status === "needs_host"
+      ? "warning"
+      : comment.reply_status === "suggested"
+        ? "good"
+        : "neutral";
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold text-slate-500">
+            {comment.viewer} {formatCommentTime(comment.created_at)}
+          </p>
+          {comment.intent ? (
+            <p className="mt-0.5 text-xs text-slate-400">
+              {comment.intent.replaceAll("_", " ")}
+            </p>
+          ) : null}
+        </div>
+        <StatusPill tone={statusTone}>
+          {ignored ? "ignored" : comment.reply_status.replaceAll("_", " ")}
+        </StatusPill>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-800">{comment.text}</p>
+      {comment.suggested_reply ? (
+        <div className="mt-3 rounded-md border border-teal-200 bg-teal-50 p-3">
+          <p className="text-sm leading-6 text-slate-700">
+            {comment.suggested_reply}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="min-h-9 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+              disabled={ignored}
+              onClick={() => onUseReply(comment.suggested_reply ?? "")}
+              type="button"
+            >
+              Use
+            </button>
+            <button
+              className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 disabled:text-slate-400"
+              disabled={ignored}
+              onClick={onIgnore}
+              type="button"
+            >
+              Ignore
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function getHesitantCheckoutSummary(
+  intents: CheckoutIntent[],
+  state: BackendState | null,
+) {
+  const now = Date.now();
+  const pendingIntents = intents.filter((intent) => {
+    const createdAt = new Date(intent.created_at).getTime();
+    return (
+      intent.status === "pending" &&
+      !Number.isNaN(createdAt) &&
+      now - createdAt >= 5000
+    );
+  });
+  const viewerCount = new Set(pendingIntents.map((intent) => intent.viewer)).size;
+  const productCounts = pendingIntents.reduce<Record<string, number>>(
+    (counts, intent) => {
+      const skuName =
+        state?.skus.find((sku) => sku.id === intent.sku_id)?.name ??
+        intent.sku_id;
+      counts[skuName] = (counts[skuName] ?? 0) + intent.quantity;
+      return counts;
+    },
+    {},
+  );
+
+  return {
+    viewerCount,
+    pendingIntents,
+    productBreakdown: Object.entries(productCounts).map(([name, quantity]) => ({
+      name,
+      quantity,
+    })),
+  };
+}
+
 export default function HostPage() {
   const [commandInput, setCommandInput] = useState(
     "Switch to the Bamboo Thermal Tumbler.",
@@ -201,6 +313,11 @@ export default function HostPage() {
     "idle" | "listening" | "unsupported" | "error"
   >("idle");
   const [liveTranscriptError, setLiveTranscriptError] = useState("");
+  const [wordCloudRefreshing, setWordCloudRefreshing] = useState(false);
+  const [viewerMonitorError, setViewerMonitorError] = useState("");
+  const [latestInsight, setLatestInsight] =
+    useState<ViewerInsightSnapshot | null>(null);
+  const [ignoredDraftIds, setIgnoredDraftIds] = useState<string[]>([]);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -219,29 +336,14 @@ export default function HostPage() {
       (pending) => pending.status === "pending" && pending.action.type !== "noop",
     ) ??
     [];
+  const recentViewerComments = backendState?.viewer_comments.slice(0, 8) ?? [];
+  const activeInsight = latestInsight ?? backendState?.viewer_insights[0] ?? null;
+  const checkoutNudge = getHesitantCheckoutSummary(
+    backendState?.checkout_intents ?? [],
+    backendState,
+  );
 
-  useEffect(() => {
-    function syncRoomState() {
-      const nextRoomState = readLocalRoomState();
-      setRoomState(nextRoomState);
-    }
-
-    syncRoomState();
-    void syncBackendState();
-    const unsubscribe = subscribeToLocalRoom(syncRoomState);
-
-    return () => {
-      if (answerPollRef.current) {
-        window.clearInterval(answerPollRef.current);
-      }
-      unsubscribe();
-      stopLiveSpeechRecognition();
-      peerRef.current?.close();
-      localStreamRef.current?.getTracks().forEach((track) => track.stop());
-    };
-  }, []);
-
-  async function syncBackendState() {
+  const syncBackendState = useCallback(async () => {
     try {
       const state = await fetchBackendState();
       setBackendState(state);
@@ -250,10 +352,80 @@ export default function HostPage() {
       const nextSkuId = getValidSkuId(state.active_sku_id);
       setActiveSkuId(nextSkuId);
       setRoomActiveSku(nextSkuId);
+      setViewerMonitorError("");
     } catch {
       setBackendStatus("offline");
     }
-  }
+  }, []);
+
+  const refreshViewerWordCloud = useCallback(async () => {
+    setWordCloudRefreshing(true);
+    try {
+      const snapshot = await generateViewerWordCloud(180);
+      setLatestInsight(snapshot);
+      setViewerMonitorError("");
+      await syncBackendState();
+    } catch (error) {
+      setViewerMonitorError(
+        error instanceof Error
+          ? error.message
+          : "Viewer word cloud refresh failed.",
+      );
+    } finally {
+      setWordCloudRefreshing(false);
+    }
+  }, [syncBackendState]);
+
+  const stopLiveSpeechRecognition = useCallback(() => {
+    shouldListenForSpeechRef.current = false;
+    const recognition = speechRecognitionRef.current;
+    speechRecognitionRef.current = null;
+    if (recognition) {
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      recognition.onstart = null;
+      recognition.abort();
+    }
+    setInterimTranscript("");
+    setLiveTranscriptStatus("idle");
+  }, []);
+
+  useEffect(() => {
+    function syncRoomState() {
+      const nextRoomState = readLocalRoomState();
+      setRoomState(nextRoomState);
+    }
+
+    syncRoomState();
+    const unsubscribe = subscribeToLocalRoom(syncRoomState);
+    const initialBackendSyncId = window.setTimeout(() => {
+      void syncBackendState();
+    }, 0);
+    const backendPollId = window.setInterval(() => {
+      void syncBackendState();
+    }, 3000);
+    const initialWordCloudId = window.setTimeout(() => {
+      void refreshViewerWordCloud();
+    }, 5000);
+    const wordCloudIntervalId = window.setInterval(() => {
+      void refreshViewerWordCloud();
+    }, 60000);
+
+    return () => {
+      if (answerPollRef.current) {
+        window.clearInterval(answerPollRef.current);
+      }
+      window.clearTimeout(initialBackendSyncId);
+      window.clearInterval(backendPollId);
+      window.clearTimeout(initialWordCloudId);
+      window.clearInterval(wordCloudIntervalId);
+      unsubscribe();
+      stopLiveSpeechRecognition();
+      peerRef.current?.close();
+      localStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, [refreshViewerWordCloud, stopLiveSpeechRecognition, syncBackendState]);
 
   function appendLedger(event: LedgerEvent) {
     setLedgerEvents((currentEvents) => [
@@ -307,21 +479,6 @@ export default function HostPage() {
       });
       setBackendStatus("offline");
     }
-  }
-
-  function stopLiveSpeechRecognition() {
-    shouldListenForSpeechRef.current = false;
-    const recognition = speechRecognitionRef.current;
-    speechRecognitionRef.current = null;
-    if (recognition) {
-      recognition.onend = null;
-      recognition.onerror = null;
-      recognition.onresult = null;
-      recognition.onstart = null;
-      recognition.abort();
-    }
-    setInterimTranscript("");
-    setLiveTranscriptStatus("idle");
   }
 
   function startLiveSpeechRecognition() {
@@ -537,6 +694,9 @@ export default function HostPage() {
     setLiveTranscriptLines([]);
     setInterimTranscript("");
     setLiveTranscriptError("");
+    setLatestInsight(null);
+    setIgnoredDraftIds([]);
+    setViewerMonitorError("");
     setLedgerEvents(initialLedger);
     setQueueItems([
       {
@@ -564,6 +724,16 @@ export default function HostPage() {
       detail: `Host sent reply to viewer room: ${trimmedReply}`,
       status: "complete",
     });
+  }
+
+  function handleUseDraftReply(reply: string) {
+    setReplyInput(reply);
+  }
+
+  function handleIgnoreDraft(commentId: string) {
+    setIgnoredDraftIds((currentIds) =>
+      currentIds.includes(commentId) ? currentIds : [...currentIds, commentId],
+    );
   }
 
   async function startHostStream() {
@@ -933,7 +1103,96 @@ export default function HostPage() {
             </div>
           </Panel>
 
-          <Panel title="Viewer Chat" eyebrow="Room messages">
+          <Panel title="Viewer AI Monitor" eyebrow="Last three minutes">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-900">
+                  Comment word cloud
+                </p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  {activeInsight
+                    ? `${activeInsight.comment_count} comments analyzed`
+                    : "Waiting for viewer comments"}
+                </p>
+              </div>
+              <button
+                className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-teal-300 hover:text-teal-800 disabled:text-slate-400"
+                disabled={wordCloudRefreshing}
+                onClick={() => void refreshViewerWordCloud()}
+                type="button"
+              >
+                {wordCloudRefreshing ? "Refreshing" : "Refresh"}
+              </button>
+            </div>
+
+            {activeInsight ? (
+              <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <p className="text-sm leading-6 text-slate-700">
+                  {activeInsight.summary}
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {activeInsight.terms.length > 0 ? (
+                    activeInsight.terms.map((term) => (
+                      <span
+                        className="rounded-md border border-teal-200 bg-white px-2 py-1 font-semibold text-teal-800"
+                        key={`${activeInsight.id}-${term.text}`}
+                        style={{
+                          fontSize: `${12 + term.weight}px`,
+                          opacity: 0.56 + term.weight / 24,
+                        }}
+                        title={`${term.count} mention weight`}
+                      >
+                        {term.text}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-sm text-slate-400">
+                      No weighted terms yet.
+                    </span>
+                  )}
+                </div>
+                {activeInsight.suggested_replies.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    {activeInsight.suggested_replies.map((reply) => (
+                      <button
+                        className="w-full rounded-md border border-teal-200 bg-white px-3 py-2 text-left text-sm leading-6 text-slate-700 transition hover:border-teal-400 hover:text-teal-900"
+                        key={reply}
+                        onClick={() => handleUseDraftReply(reply)}
+                        type="button"
+                      >
+                        {reply}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {viewerMonitorError ? (
+              <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
+                {viewerMonitorError}
+              </p>
+            ) : null}
+
+            <div className="mt-4 space-y-3">
+              {recentViewerComments.map((comment) => (
+                <ViewerCommentCard
+                  comment={comment}
+                  ignored={ignoredDraftIds.includes(comment.id)}
+                  key={comment.id}
+                  onIgnore={() => handleIgnoreDraft(comment.id)}
+                  onUseReply={handleUseDraftReply}
+                />
+              ))}
+              {recentViewerComments.length === 0 ? (
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                  No backend viewer comments yet.
+                </p>
+              ) : null}
+            </div>
+          </Panel>
+
+          <Panel title="Viewer Chat" eyebrow="Legacy room messages">
             <div className="space-y-3">
               {mockChat.map((chat) => (
                 <div
@@ -964,6 +1223,38 @@ export default function HostPage() {
         </div>
 
         <div className="grid gap-4">
+          {checkoutNudge.viewerCount > 0 ? (
+            <Panel title="Checkout Nudge" eyebrow="Pending buyers">
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-slate-950">
+                    {checkoutNudge.viewerCount} viewer
+                    {checkoutNudge.viewerCount === 1 ? "" : "s"} ready to buy
+                  </p>
+                  <StatusPill tone="warning">5s waiting</StatusPill>
+                </div>
+                <p className="mt-2 text-sm leading-6 text-slate-700">
+                  Encourage them now with a quick price, stock, or benefit recap.
+                </p>
+                <div className="mt-3 space-y-2">
+                  {checkoutNudge.productBreakdown.map((item) => (
+                    <div
+                      className="flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-white px-3 py-2 text-sm"
+                      key={item.name}
+                    >
+                      <span className="min-w-0 truncate font-medium text-slate-800">
+                        {item.name}
+                      </span>
+                      <span className="shrink-0 font-semibold text-amber-800">
+                        {item.quantity} unit{item.quantity === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </Panel>
+          ) : null}
+
           <Panel title="Agent Event Timeline" eyebrow="Ledger">
             <div className="space-y-3">
               {ledgerEvents.map((event) => {

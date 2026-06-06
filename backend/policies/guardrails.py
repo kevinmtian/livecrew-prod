@@ -4,6 +4,17 @@ from backend.models import CommerceState, GuardrailResult, ProposedAction
 from backend.tools.sku_resolver import get_sku_by_id
 
 
+UNSUPPORTED_REPLY_CLAIMS = [
+    "cure acne",
+    "cures acne",
+    "guaranteed delivery",
+    "guarantee delivery",
+    "authenticity guaranteed",
+    "50% off",
+    "free shipping",
+]
+
+
 def validate_action(
     action: ProposedAction,
     state: CommerceState,
@@ -15,6 +26,46 @@ def validate_action(
             allowed=True,
             status="allowed",
             reason=action.reason or "No commerce action required.",
+        )
+
+    if action.type == "suggest_reply":
+        if not action.reply_text:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="blocked",
+                reason="Suggested replies need grounded reply text.",
+            )
+        normalized_reply = action.reply_text.lower()
+        unsupported_claim = next(
+            (
+                phrase
+                for phrase in UNSUPPORTED_REPLY_CLAIMS
+                if phrase in normalized_reply
+                and f"cannot promise {phrase}" not in normalized_reply
+                and f"can't promise {phrase}" not in normalized_reply
+            ),
+            None,
+        )
+        if unsupported_claim:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="blocked",
+                reason=f"Suggested reply included unsupported claim: {unsupported_claim}.",
+            )
+        if action.requires_host_confirmation and not host_approved:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="needs_host_confirmation",
+                reason=action.reason or "Suggested reply needs host review.",
+            )
+        return GuardrailResult(
+            action_type=action.type,
+            allowed=True,
+            status="allowed",
+            reason="Suggested reply passed deterministic guardrails.",
         )
 
     if action.sku_id and not get_sku_by_id(action.sku_id, state.skus):

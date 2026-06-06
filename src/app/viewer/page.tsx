@@ -3,7 +3,6 @@
 import { AppShell, StatusPill } from "@/components/dashboard";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
-  appendViewerMessage,
   defaultLocalRoomState,
   type LocalRoomState,
   readLocalRoomState,
@@ -11,12 +10,17 @@ import {
 } from "@/lib/local-room";
 import {
   type BackendState,
+  type CheckoutIntent,
+  cancelCheckoutIntent,
+  confirmCheckoutIntent,
   fetchBackendState,
   fetchLatestMediaSession,
   fetchMediaSession,
   getBackendUrl,
   postIceCandidate,
   postMediaAnswer,
+  sendViewerMessage,
+  startCheckoutIntent,
 } from "@/lib/livecrew-api";
 import { mockChat } from "@/lib/mock-data";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -45,8 +49,28 @@ const initialReplies: RoomReply[] = [
   },
 ];
 
+const VIEWER_ID_STORAGE_KEY = "livecrew.viewer-id.v1";
+
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
+}
+
+function getViewerIdentity() {
+  if (typeof window === "undefined") {
+    return "viewer";
+  }
+
+  const existingId = window.localStorage.getItem(VIEWER_ID_STORAGE_KEY);
+  if (existingId) {
+    return existingId;
+  }
+
+  const nextId =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? `viewer-${crypto.randomUUID().slice(0, 8)}`
+      : `viewer-${Date.now().toString(36)}`;
+  window.localStorage.setItem(VIEWER_ID_STORAGE_KEY, nextId);
+  return nextId;
 }
 
 function getFlashSaleSecondsLeft(
@@ -71,12 +95,25 @@ export default function ViewerPage() {
   const [streamError, setStreamError] = useState("");
   const [backendState, setBackendState] = useState<BackendState | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [messageStatus, setMessageStatus] = useState<
+    "idle" | "sending" | "failed"
+  >("idle");
+  const [remoteMuted, setRemoteMuted] = useState(true);
+  const [purchaseQuantity, setPurchaseQuantity] = useState(1);
+  const [checkoutIntent, setCheckoutIntent] = useState<CheckoutIntent | null>(
+    null,
+  );
+  const [checkoutStatus, setCheckoutStatus] = useState<
+    "idle" | "starting" | "confirming" | "cancelling"
+  >("idle");
+  const [checkoutError, setCheckoutError] = useState("");
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const hostCandidateCountRef = useRef(0);
   const pollRef = useRef<number | null>(null);
+  const remoteMutedRef = useRef(true);
 
   const fallbackProduct = getActiveSkuDisplay(
     backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
@@ -104,6 +141,44 @@ export default function ViewerPage() {
     Boolean(activeFlashSale) &&
     flashSaleSecondsLeft > 0 &&
     (activeFlashSale?.remaining_stock ?? 0) > 0;
+  const backendViewerComments = backendState?.viewer_comments ?? [];
+  function getPurchasableQuantityForSku(skuId: string | null) {
+    const sku = backendState?.skus.find((stateSku) => stateSku.id === skuId);
+    if (!sku) {
+      return 0;
+    }
+    const sale = backendState?.flash_sale;
+    const saleCreatedAt = sale ? new Date(sale.created_at).getTime() : Number.NaN;
+    const saleSecondsLeft =
+      sale && !Number.isNaN(saleCreatedAt)
+        ? Math.max(
+            0,
+            Math.ceil(
+              (saleCreatedAt + sale.duration_seconds * 1000 - now) / 1000,
+            ),
+          )
+        : 0;
+    if (
+      sale?.sku_id === sku.id &&
+      saleSecondsLeft > 0 &&
+      sale.remaining_stock > 0
+    ) {
+      return Math.min(sku.stock, sale.remaining_stock);
+    }
+    return sku.stock;
+  }
+
+  const purchasableQuantity = getPurchasableQuantityForSku(backendActiveSkuId);
+  const cappedPurchaseQuantity = Math.min(
+    Math.max(1, purchaseQuantity),
+    Math.max(1, purchasableQuantity),
+  );
+  const checkoutProduct = checkoutIntent
+    ? backendState?.skus.find((sku) => sku.id === checkoutIntent.sku_id)
+    : null;
+  const checkoutAvailableQuantity = checkoutIntent
+    ? getPurchasableQuantityForSku(checkoutIntent.sku_id)
+    : purchasableQuantity;
 
   const syncBackendState = useCallback(async () => {
     try {
@@ -114,10 +189,22 @@ export default function ViewerPage() {
     }
   }, []);
 
-  const connectToLatestStream = useCallback(async () => {
-    if (peerRef.current) {
-      return;
+  const closeViewerPeer = useCallback(() => {
+    if (pollRef.current) {
+      window.clearInterval(pollRef.current);
+      pollRef.current = null;
     }
+    peerRef.current?.close();
+    peerRef.current = null;
+    sessionIdRef.current = null;
+    hostCandidateCountRef.current = 0;
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
+  }, []);
+
+  const connectToLatestStream = useCallback(async () => {
+    closeViewerPeer();
 
     setConnectionStatus("connecting");
     setStreamError("");
@@ -139,14 +226,19 @@ export default function ViewerPage() {
       peer.ontrack = (event) => {
         const [stream] = event.streams;
         if (remoteVideoRef.current && stream) {
-          remoteVideoRef.current.srcObject = stream;
+          const video = remoteVideoRef.current;
+          video.srcObject = stream;
+          video.muted = remoteMutedRef.current;
+          video.play().catch(() => {
+            setStreamError("Tap Connect to allow video playback in this browser.");
+          });
           setConnectionStatus("live");
         }
       };
       peer.onconnectionstatechange = () => {
         if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
           setConnectionStatus("offline");
-          peerRef.current = null;
+          closeViewerPeer();
         }
       };
       peer.onicecandidate = (event) => {
@@ -170,8 +262,7 @@ export default function ViewerPage() {
         }
         const latest = await fetchMediaSession(sessionIdRef.current);
         if (latest.status === "stopped") {
-          peerRef.current.close();
-          peerRef.current = null;
+          closeViewerPeer();
           setConnectionStatus("offline");
           return;
         }
@@ -185,14 +276,14 @@ export default function ViewerPage() {
       }, 1000);
     } catch (error) {
       setConnectionStatus("offline");
-      peerRef.current = null;
+      closeViewerPeer();
       setStreamError(
         error instanceof Error
           ? error.message
           : "Unable to connect to host stream.",
       );
     }
-  }, []);
+  }, [closeViewerPeer]);
 
   useEffect(() => {
     function syncRoomState() {
@@ -223,11 +314,25 @@ export default function ViewerPage() {
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
       }
-      peerRef.current?.close();
+      closeViewerPeer();
     };
-  }, [connectToLatestStream, syncBackendState]);
+  }, [closeViewerPeer, connectToLatestStream, syncBackendState]);
 
-  function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
+  function toggleRemoteAudio() {
+    const nextMuted = !remoteMuted;
+    setRemoteMuted(nextMuted);
+    remoteMutedRef.current = nextMuted;
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = nextMuted;
+      if (!nextMuted) {
+        remoteVideoRef.current.play().catch(() => {
+          setStreamError("Browser blocked audio playback. Try Connect again.");
+        });
+      }
+    }
+  }
+
+  async function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const trimmedMessage = messageInput.trim();
@@ -236,9 +341,90 @@ export default function ViewerPage() {
       return;
     }
 
-    appendViewerMessage(trimmedMessage, "You");
-    setRoomState(readLocalRoomState());
-    setMessageInput("");
+    setMessageStatus("sending");
+    try {
+      const response = await sendViewerMessage(
+        trimmedMessage,
+        getViewerIdentity(),
+      );
+      setBackendState(response.state);
+      setMessageInput("");
+      setMessageStatus("idle");
+    } catch {
+      setMessageStatus("failed");
+    }
+  }
+
+  function updatePurchaseQuantity(nextQuantity: number) {
+    setPurchaseQuantity(
+      Math.min(Math.max(1, nextQuantity), Math.max(1, purchasableQuantity)),
+    );
+  }
+
+  async function handleStartCheckout() {
+    if (!backendActiveSkuId || purchasableQuantity < 1) {
+      return;
+    }
+
+    setCheckoutStatus("starting");
+    setCheckoutError("");
+    try {
+      const response = await startCheckoutIntent(
+        backendActiveSkuId,
+        cappedPurchaseQuantity,
+        getViewerIdentity(),
+      );
+      setBackendState(response.state);
+      setCheckoutIntent(response.checkout_intent);
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "Unable to start checkout.",
+      );
+    } finally {
+      setCheckoutStatus("idle");
+    }
+  }
+
+  async function handleCancelCheckout() {
+    if (!checkoutIntent || checkoutIntent.status !== "pending") {
+      setCheckoutIntent(null);
+      return;
+    }
+
+    setCheckoutStatus("cancelling");
+    setCheckoutError("");
+    try {
+      const response = await cancelCheckoutIntent(checkoutIntent.id);
+      setBackendState(response.state);
+      setCheckoutIntent(null);
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "Unable to cancel checkout.",
+      );
+    } finally {
+      setCheckoutStatus("idle");
+    }
+  }
+
+  async function handleConfirmCheckout() {
+    if (!checkoutIntent) {
+      return;
+    }
+
+    setCheckoutStatus("confirming");
+    setCheckoutError("");
+    try {
+      const response = await confirmCheckoutIntent(checkoutIntent.id);
+      setBackendState(response.state);
+      setCheckoutIntent(null);
+      setPurchaseQuantity(1);
+    } catch (error) {
+      setCheckoutError(
+        error instanceof Error ? error.message : "Unable to confirm checkout.",
+      );
+    } finally {
+      setCheckoutStatus("idle");
+    }
   }
 
   return (
@@ -252,6 +438,7 @@ export default function ViewerPage() {
           <video
             autoPlay
             className="absolute inset-0 h-full w-full object-cover"
+            muted={remoteMuted}
             playsInline
             ref={remoteVideoRef}
           />
@@ -297,6 +484,25 @@ export default function ViewerPage() {
                   </p>
                 ) : null}
               </div>
+            </div>
+          ) : null}
+
+          {connectionStatus === "live" ? (
+            <div className="absolute right-3 top-16 flex gap-2">
+              <button
+                className="min-h-9 rounded-md border border-white/20 bg-black/55 px-3 text-xs font-semibold text-white backdrop-blur transition hover:bg-black/70"
+                onClick={toggleRemoteAudio}
+                type="button"
+              >
+                {remoteMuted ? "Unmute" : "Mute"}
+              </button>
+              <button
+                className="min-h-9 rounded-md border border-white/20 bg-black/55 px-3 text-xs font-semibold text-white backdrop-blur transition hover:bg-black/70"
+                onClick={() => void connectToLatestStream()}
+                type="button"
+              >
+                Reconnect
+              </button>
             </div>
           ) : null}
 
@@ -347,6 +553,52 @@ export default function ViewerPage() {
                   </p>
                 </div>
               </div>
+            ) : null}
+            <div className="mt-3 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2">
+              <div className="flex min-h-10 items-center overflow-hidden rounded-md border border-slate-200 bg-white">
+                <button
+                  className="h-10 w-10 text-base font-semibold text-slate-700 transition hover:bg-slate-100 disabled:text-slate-300"
+                  disabled={cappedPurchaseQuantity <= 1 || checkoutStatus !== "idle"}
+                  onClick={() => updatePurchaseQuantity(cappedPurchaseQuantity - 1)}
+                  type="button"
+                >
+                  -
+                </button>
+                <span className="min-w-10 text-center text-sm font-semibold text-slate-900">
+                  {cappedPurchaseQuantity}
+                </span>
+                <button
+                  className="h-10 w-10 text-base font-semibold text-slate-700 transition hover:bg-slate-100 disabled:text-slate-300"
+                  disabled={
+                    cappedPurchaseQuantity >= purchasableQuantity ||
+                    checkoutStatus !== "idle"
+                  }
+                  onClick={() => updatePurchaseQuantity(cappedPurchaseQuantity + 1)}
+                  type="button"
+                >
+                  +
+                </button>
+              </div>
+              <p className="min-w-0 truncate text-xs text-slate-500">
+                {purchasableQuantity} available
+              </p>
+              <button
+                className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                disabled={
+                  !backendActiveSkuId ||
+                  purchasableQuantity < 1 ||
+                  checkoutStatus !== "idle"
+                }
+                onClick={() => void handleStartCheckout()}
+                type="button"
+              >
+                {checkoutStatus === "starting" ? "Opening" : "Buy"}
+              </button>
+            </div>
+            {checkoutError ? (
+              <p className="mt-2 text-xs leading-5 text-amber-700">
+                {checkoutError}
+              </p>
             ) : null}
           </div>
         </section>
@@ -408,13 +660,13 @@ export default function ViewerPage() {
                 </p>
               </div>
             ))}
-            {roomState.viewerMessages.map((chat) => (
+            {[...backendViewerComments].reverse().map((chat) => (
               <div
                 className="ml-auto max-w-[88%] rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
                 key={chat.id}
               >
                 <p className="text-xs font-semibold text-slate-500">
-                  {chat.name}
+                  {chat.viewer}
                 </p>
                 <p className="mt-1 text-sm leading-5 text-slate-800">
                   {chat.text}
@@ -439,13 +691,99 @@ export default function ViewerPage() {
             />
             <button
               className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800"
+              disabled={messageStatus === "sending"}
               type="submit"
             >
-              Send
+              {messageStatus === "sending" ? "Sending" : "Send"}
             </button>
           </form>
+          {messageStatus === "failed" ? (
+            <p className="border-t border-amber-100 bg-amber-50 px-4 py-2 text-xs leading-5 text-amber-800">
+              Backend chat is unavailable. Start FastAPI on port 8000 and try again.
+            </p>
+          ) : null}
         </section>
       </div>
+      {checkoutIntent ? (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 px-4 py-5 sm:items-center">
+          <div
+            aria-modal="true"
+            className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-4 shadow-xl"
+            role="dialog"
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-teal-700">
+                  Confirm purchase
+                </p>
+                <h2 className="mt-1 text-lg font-semibold text-slate-950">
+                  {checkoutProduct?.name ?? displayProduct.name}
+                </h2>
+              </div>
+              <button
+                className="min-h-9 rounded-md border border-slate-200 px-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50"
+                disabled={checkoutStatus !== "idle"}
+                onClick={() => void handleCancelCheckout()}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+            <dl className="mt-4 grid gap-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm">
+              <div className="flex justify-between gap-3">
+                <dt className="text-slate-500">Unit price</dt>
+                <dd className="font-semibold text-slate-950">
+                  {formatPrice(checkoutIntent.unit_price_cents)}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-slate-500">Quantity</dt>
+                <dd className="font-semibold text-slate-950">
+                  {checkoutIntent.quantity}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-slate-500">Available now</dt>
+                <dd className="font-semibold text-slate-950">
+                  {checkoutAvailableQuantity}
+                </dd>
+              </div>
+              <div className="border-t border-slate-200 pt-3 flex justify-between gap-3">
+                <dt className="text-slate-700">Total</dt>
+                <dd className="text-base font-bold text-slate-950">
+                  {formatPrice(checkoutIntent.total_price_cents)}
+                </dd>
+              </div>
+            </dl>
+            {checkoutError ? (
+              <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
+                {checkoutError}
+              </p>
+            ) : null}
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                className="min-h-11 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 disabled:text-slate-400"
+                disabled={checkoutStatus !== "idle"}
+                onClick={() => void handleCancelCheckout()}
+                type="button"
+              >
+                Cancel
+              </button>
+              <button
+                className="min-h-11 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                disabled={
+                  checkoutStatus !== "idle" ||
+                  checkoutIntent.quantity > checkoutAvailableQuantity
+                }
+                onClick={() => void handleConfirmCheckout()}
+                type="button"
+              >
+                {checkoutStatus === "confirming" ? "Confirming" : "Confirm"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

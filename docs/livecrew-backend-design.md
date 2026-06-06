@@ -241,6 +241,9 @@ class CommerceState(BaseModel):
     active_sku_id: str | None
     skus: list[SKU]
     flash_sale: FlashSale | None
+    viewer_comments: list[ViewerComment]
+    viewer_insights: list[ViewerInsightSnapshot]
+    checkout_intents: list[CheckoutIntent]
     orders: list[Order]
     announcements: list[Announcement]
     pending_actions: list[PendingAction]
@@ -252,10 +255,15 @@ Important rules:
 
 - `active_sku_id` represents the product currently displayed in the live room.
 - SKU stock and prices are backend source of truth.
+- Viewer comments are backend source of truth for ConciergeAgent replies and host monitoring.
+- Viewer insight snapshots summarize the most recent three-minute comment window for the host cockpit.
+- Checkout intents represent viewers who opened a purchase confirmation modal but have not yet confirmed or cancelled.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
 - Pending actions represent proposals waiting for host approval and must not change commerce state.
 - Reset restores SKUs to seeded stock and prices, then clears orders, flash sale, active SKU, announcements, pending actions, metrics, and ledger.
+- Reset clears viewer comments and viewer insight snapshots.
+- Reset clears checkout intents and orders.
 
 ## 7. Host Transcript and Text Commands as Action Stream
 
@@ -490,8 +498,31 @@ Responsibilities:
 - Generate grounded product replies from SKU facts and current commerce state.
 - Propose `create_order` only when order intent is clear.
 - Escalate ambiguous SKU, unclear quantity, unsupported discounts, and unsafe claims.
+- Produce per-message suggested replies that the host can use or ignore in the cockpit.
 
 It cannot invent discounts, delivery promises, authenticity claims, medical guarantees, or unsupported product claims.
+
+### ViewerInsightsAgent
+
+Input:
+
+- Current `CommerceState`
+- Viewer comments created in the previous three minutes
+- Current active SKU and seeded SKU facts
+
+Output:
+
+- `ViewerInsightSnapshot`
+
+Responsibilities:
+
+- Run every minute when requested by the host cockpit.
+- Build a weighted word cloud from recent viewer language, SKU aliases, intent terms, and repeated product questions.
+- Summarize what viewers are asking for in one short operational sentence.
+- Suggest grounded host talking points or replies using only SKU facts and current backend commerce state.
+- Use OpenAI for concise theme clustering when available, with deterministic fallback when OpenAI is unavailable or returns invalid output.
+
+ViewerInsightsAgent is read-only. It may append a `viewer_word_cloud_generated` ledger event and store a snapshot, but it must not mutate SKU, price, stock, flash sale, order, or pending confirmation state.
 
 ### GuardrailNode
 
@@ -619,6 +650,11 @@ GET  /events/stream
 POST /events/host-transcript
 POST /events/host-command
 POST /events/viewer-message
+POST /viewer-insights/word-cloud
+
+POST /checkout-intents
+POST /checkout-intents/{checkout_intent_id}/confirm
+POST /checkout-intents/{checkout_intent_id}/cancel
 
 POST /commerce/flash-sale
 POST /commerce/announcement
@@ -706,6 +742,105 @@ class WorkflowResponse(BaseModel):
     report: ProducerReport | None
     state: CommerceState
 ```
+
+Viewer message handling rules:
+
+- The route records the raw viewer message in `CommerceState.viewer_comments`.
+- ConciergeAgent analyzes the message against the active SKU and catalogue.
+- If a grounded reply is safe, it returns a `suggest_reply` action and stores that reply on the viewer comment.
+- If the message asks for unsupported discounts, medical guarantees, delivery promises, authenticity claims, or other unsafe claims, the suggested reply should safely decline or route to host confirmation without inventing facts.
+- The ledger records `viewer_message_received` and either `answer_suggested`, `guardrail_block`, or `host_escalation`.
+
+### `POST /viewer-insights/word-cloud`
+
+The host cockpit calls this once per minute and may call it manually for demo testing.
+
+Request:
+
+```json
+{
+  "window_seconds": 180
+}
+```
+
+Response:
+
+```python
+class ViewerInsightSnapshot(BaseModel):
+    id: str
+    window_started_at: datetime
+    window_ended_at: datetime
+    active_sku_id: str | None
+    comment_count: int
+    terms: list[WordCloudTerm]
+    summary: str
+    suggested_replies: list[str]
+    source_comment_ids: list[str]
+    created_at: datetime
+```
+
+Rules:
+
+- Default window is 180 seconds.
+- Terms are sorted by descending weight.
+- OpenAI may cluster terms and draft summary text, but the backend validates the returned term shape and falls back to deterministic extraction if needed.
+- The snapshot is stored in `CommerceState.viewer_insights` and a `viewer_word_cloud_generated` ledger entry is appended.
+- The route is read-only with respect to commerce state: it must not change products, prices, stock, flash sales, orders, or pending actions.
+
+### Viewer Purchase Endpoints
+
+`POST /checkout-intents`
+
+Request:
+
+```json
+{
+  "viewer": "viewer_12",
+  "sku_id": "bamboo-thermal-tumbler",
+  "quantity": 2
+}
+```
+
+Response:
+
+```python
+class CheckoutIntentResponse(BaseModel):
+    checkout_intent: CheckoutIntent
+    state: CommerceState
+```
+
+Rules:
+
+- SKU must be grounded to an existing backend SKU.
+- Quantity must be a positive integer.
+- Quantity must not exceed current purchasable quantity.
+- Unit price is snapshotted from the backend current purchase price when the intent is created.
+- A `checkout_intent_started` ledger event is appended.
+
+`POST /checkout-intents/{checkout_intent_id}/confirm`
+
+Rules:
+
+- Only pending checkout intents may be confirmed.
+- Confirmation revalidates current stock and flash-sale remaining stock before creating an order.
+- Confirmed orders record SKU id, viewer, quantity, unit price, total price, and checkout intent id.
+- Confirmation reduces SKU stock and flash-sale remaining stock when the flash sale price is used.
+- Ledger events include `order_created` and `checkout_intent_confirmed`.
+
+`POST /checkout-intents/{checkout_intent_id}/cancel`
+
+Rules:
+
+- Pending checkout intents may be cancelled by the viewer closing the modal.
+- Cancelled checkout intents do not reduce stock and no longer count toward host nudges.
+- A `checkout_intent_cancelled` ledger event is appended.
+
+Host checkout nudge rules:
+
+- The host cockpit computes hesitant checkout viewers from backend `checkout_intents`.
+- Pending checkout intents older than five seconds should count as hesitant.
+- Count unique viewers, not only total intents.
+- Show a product breakdown by SKU so the host can encourage viewers verbally.
 
 ## 12. Realtime Updates
 
@@ -850,12 +985,17 @@ list_product
 price_updated
 price_restored
 answer_suggested
+viewer_message_received
+viewer_word_cloud_generated
 guardrail_block
 host_escalation
 host_confirmation_requested
 host_confirmation_resolved
 host_override
 order_created
+checkout_intent_started
+checkout_intent_confirmed
+checkout_intent_cancelled
 stock_updated
 create_flash_sale
 flash_sale_cancelled

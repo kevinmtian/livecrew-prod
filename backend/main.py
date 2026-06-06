@@ -9,17 +9,35 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from backend.commerce import approve_pending_action, reject_pending_action
+from backend.agents.concierge import analyze_viewer_message
+from backend.agents.viewer_insights import generate_viewer_word_cloud
+from backend.commerce import (
+    apply_action,
+    approve_pending_action,
+    cancel_checkout_intent,
+    confirm_checkout_intent,
+    create_checkout_intent,
+    reject_pending_action,
+)
 from backend.graphs.livecrew_graph import run_cohost_workflow
 from backend.media_signaling import media_store
 from backend.models import (
+    CheckoutIntentRequest,
+    CheckoutIntentResponse,
+    LedgerEntry,
+    OrderResponse,
     SessionCreateResponse,
     SignalPayload,
     TextEventRequest,
     TranscriptionResponse,
+    ViewerComment,
+    ViewerInsightRequest,
+    ViewerInsightSnapshot,
+    ViewerMessageRequest,
     WorkflowResponse,
 )
 from backend.openai_client import transcribe_audio_file
+from backend.policies.guardrails import validate_action
 from backend.state import commerce_store
 
 
@@ -106,6 +124,139 @@ def host_transcript(request: TextEventRequest):
     if not request.text.strip():
         raise HTTPException(status_code=400, detail="Transcript text is required.")
     return run_cohost_workflow(request.text.strip(), "speech_transcript")
+
+
+@app.post("/events/viewer-message", response_model=WorkflowResponse)
+def viewer_message(request: ViewerMessageRequest):
+    text = request.text.strip()
+    viewer = request.viewer.strip() or "viewer"
+    if not text:
+        raise HTTPException(status_code=400, detail="Viewer message is required.")
+
+    state = commerce_store.get()
+    decision, proposed_actions, intent = analyze_viewer_message(text, viewer, state)
+    guardrail_results = [validate_action(action, state) for action in proposed_actions]
+    viewer_comment = ViewerComment(
+        viewer=viewer,
+        text=text,
+        sku_id=proposed_actions[0].sku_id if proposed_actions else None,
+        suggested_reply=proposed_actions[0].reply_text if proposed_actions else None,
+        intent=intent,
+    )
+
+    applied_actions = []
+    ledger_entries = [
+        LedgerEntry(
+            type="viewer_message_received",
+            detail=f"{viewer} commented: {text}",
+            source_text=text,
+            payload={
+                "viewer": viewer,
+                "comment_id": viewer_comment.id,
+                "sku_id": viewer_comment.sku_id,
+                "intent": intent,
+            },
+        )
+    ]
+
+    for action, guardrail in zip(proposed_actions, guardrail_results, strict=False):
+        applied, ledger_entry = apply_action(action, guardrail, state)
+        if applied:
+            applied_actions.append(applied)
+        ledger_entries.append(ledger_entry)
+
+        if action.type == "suggest_reply":
+            viewer_comment.suggested_reply = action.reply_text
+            if guardrail.status == "allowed":
+                viewer_comment.reply_status = "suggested"
+            elif guardrail.status == "needs_host_confirmation":
+                viewer_comment.reply_status = "needs_host"
+            else:
+                viewer_comment.reply_status = "blocked"
+
+    state.viewer_comments = [viewer_comment, *state.viewer_comments][:200]
+    state.ledger = [*ledger_entries, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+
+    return WorkflowResponse(
+        agent_decisions=[decision],
+        proposed_actions=proposed_actions,
+        guardrail_results=guardrail_results,
+        pending_actions=updated_state.pending_actions,
+        applied_actions=applied_actions,
+        ledger_entries=ledger_entries,
+        state=updated_state,
+    )
+
+
+@app.post("/viewer-insights/word-cloud", response_model=ViewerInsightSnapshot)
+def viewer_word_cloud(request: ViewerInsightRequest):
+    state = commerce_store.get()
+    snapshot = generate_viewer_word_cloud(state, request.window_seconds)
+    state.viewer_insights = [snapshot, *state.viewer_insights][:10]
+    state.ledger = [
+        LedgerEntry(
+            type="viewer_word_cloud_generated",
+            detail=f"Generated viewer word cloud from {snapshot.comment_count} recent comment(s).",
+            payload={
+                "snapshot_id": snapshot.id,
+                "window_seconds": request.window_seconds,
+                "comment_count": snapshot.comment_count,
+                "terms": [term.model_dump(mode="json") for term in snapshot.terms],
+            },
+        ),
+        *state.ledger,
+    ][:200]
+    commerce_store.replace(state)
+    return snapshot
+
+
+@app.post("/checkout-intents", response_model=CheckoutIntentResponse)
+def start_checkout(request: CheckoutIntentRequest):
+    viewer = request.viewer.strip() or "viewer"
+    state = commerce_store.get()
+    try:
+        intent, ledger_entry = create_checkout_intent(
+            state,
+            viewer=viewer,
+            sku_id=request.sku_id,
+            quantity=request.quantity,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    state.ledger = [ledger_entry, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return CheckoutIntentResponse(checkout_intent=intent, state=updated_state)
+
+
+@app.post("/checkout-intents/{checkout_intent_id}/confirm", response_model=OrderResponse)
+def confirm_checkout(checkout_intent_id: str):
+    state = commerce_store.get()
+    try:
+        order, ledger_entries = confirm_checkout_intent(state, checkout_intent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    state.ledger = [*ledger_entries, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return OrderResponse(order=order, state=updated_state)
+
+
+@app.post(
+    "/checkout-intents/{checkout_intent_id}/cancel",
+    response_model=CheckoutIntentResponse,
+)
+def cancel_checkout(checkout_intent_id: str):
+    state = commerce_store.get()
+    try:
+        intent, ledger_entry = cancel_checkout_intent(state, checkout_intent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    state.ledger = [ledger_entry, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return CheckoutIntentResponse(checkout_intent=intent, state=updated_state)
 
 
 @app.post("/events/transcribe-audio", response_model=TranscriptionResponse)

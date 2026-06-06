@@ -14,6 +14,7 @@ ActionType = Literal[
     "restore_price",
     "create_flash_sale",
     "cancel_flash_sale",
+    "create_order",
     "suggest_reply",
     "request_host_confirmation",
     "noop",
@@ -101,6 +102,59 @@ class LedgerEntry(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ViewerComment(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("comment"))
+    viewer: str = "viewer"
+    text: str
+    sku_id: str | None = None
+    suggested_reply: str | None = None
+    reply_status: Literal["suggested", "needs_host", "blocked", "none"] = "none"
+    intent: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class WordCloudTerm(BaseModel):
+    text: str
+    weight: int = Field(ge=1, le=10)
+    count: int = Field(ge=1)
+
+
+class ViewerInsightSnapshot(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("insight"))
+    window_started_at: datetime
+    window_ended_at: datetime
+    active_sku_id: str | None = None
+    comment_count: int
+    terms: list[WordCloudTerm] = Field(default_factory=list)
+    summary: str
+    suggested_replies: list[str] = Field(default_factory=list)
+    source_comment_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class CheckoutIntent(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("checkout"))
+    viewer: str = "viewer"
+    sku_id: str
+    quantity: int = Field(ge=1)
+    unit_price_cents: int = Field(ge=1)
+    total_price_cents: int = Field(ge=1)
+    status: Literal["pending", "confirmed", "cancelled"] = "pending"
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class Order(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("order"))
+    viewer: str = "viewer"
+    sku_id: str
+    quantity: int = Field(ge=1)
+    unit_price_cents: int = Field(ge=1)
+    total_price_cents: int = Field(ge=1)
+    checkout_intent_id: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class PendingAction(BaseModel):
     id: str = Field(default_factory=lambda: create_id("pending"))
     action: ProposedAction
@@ -113,6 +167,10 @@ class CommerceState(BaseModel):
     active_sku_id: str | None = None
     skus: list[SKU]
     flash_sale: FlashSale | None = None
+    viewer_comments: list[ViewerComment] = Field(default_factory=list)
+    viewer_insights: list[ViewerInsightSnapshot] = Field(default_factory=list)
+    checkout_intents: list[CheckoutIntent] = Field(default_factory=list)
+    orders: list[Order] = Field(default_factory=list)
     pending_actions: list[PendingAction] = Field(default_factory=list)
     ledger: list[LedgerEntry] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -136,6 +194,26 @@ class TextEventRequest(BaseModel):
 class ViewerMessageRequest(BaseModel):
     viewer: str = "viewer"
     text: str
+
+
+class ViewerInsightRequest(BaseModel):
+    window_seconds: int = Field(default=180, ge=30, le=900)
+
+
+class CheckoutIntentRequest(BaseModel):
+    viewer: str = "viewer"
+    sku_id: str
+    quantity: int = Field(ge=1)
+
+
+class CheckoutIntentResponse(BaseModel):
+    checkout_intent: CheckoutIntent
+    state: CommerceState
+
+
+class OrderResponse(BaseModel):
+    order: Order
+    state: CommerceState
 
 
 class TranscriptionResponse(BaseModel):
