@@ -2,14 +2,15 @@
 
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
+import {
+  appendViewerMessage,
+  defaultLocalRoomState,
+  type LocalRoomState,
+  readLocalRoomState,
+  subscribeToLocalRoom,
+} from "@/lib/local-room";
 import { mockChat } from "@/lib/mock-data";
-import { FormEvent, useState } from "react";
-
-type ViewerMessage = {
-  id: string;
-  viewer: string;
-  message: string;
-};
+import { type FormEvent, useEffect, useState } from "react";
 
 type RoomReply = {
   id: string;
@@ -49,15 +50,22 @@ const flashSale = {
 };
 
 export default function ViewerPage() {
-  const activeProduct = getActiveSkuDisplay(defaultActiveSkuId);
+  const [roomState, setRoomState] =
+    useState<LocalRoomState>(defaultLocalRoomState);
   const [messageInput, setMessageInput] = useState("");
-  const [viewerMessages, setViewerMessages] = useState<ViewerMessage[]>(
-    mockChat.map((chat, index) => ({
-      id: `mock-chat-${index}`,
-      viewer: chat.viewer,
-      message: chat.message,
-    })),
+  const activeProduct = getActiveSkuDisplay(
+    roomState.activeSkuId ?? defaultActiveSkuId,
   );
+
+  useEffect(() => {
+    function syncRoomState() {
+      setRoomState(readLocalRoomState());
+    }
+
+    syncRoomState();
+
+    return subscribeToLocalRoom(syncRoomState);
+  }, []);
 
   function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -68,14 +76,8 @@ export default function ViewerPage() {
       return;
     }
 
-    setViewerMessages((currentMessages) => [
-      ...currentMessages,
-      {
-        id: `viewer-message-${Date.now()}`,
-        viewer: "You",
-        message: trimmedMessage,
-      },
-    ]);
+    appendViewerMessage(trimmedMessage, "You");
+    setRoomState(readLocalRoomState());
     setMessageInput("");
   }
 
@@ -145,20 +147,49 @@ export default function ViewerPage() {
                   </p>
                 </div>
               ))}
+              {roomState.replies.map((reply) => (
+                <div
+                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
+                  key={reply.id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-teal-700">
+                      {reply.name}
+                    </p>
+                    <StatusPill tone="good">Synced</StatusPill>
+                  </div>
+                  <p className="mt-1 text-sm leading-6 text-slate-800">
+                    {reply.text}
+                  </p>
+                </div>
+              ))}
             </div>
           </Panel>
           <Panel title="Viewer Chat" eyebrow="Local messages">
             <div className="max-h-[28rem] space-y-3 overflow-y-auto pr-1">
-              {viewerMessages.map((chat) => (
+              {mockChat.map((chat) => (
                 <div
                   className="rounded-md border border-slate-200 bg-slate-50 p-3"
-                  key={chat.id}
+                  key={`${chat.viewer}-${chat.message}`}
                 >
                   <p className="text-xs font-semibold text-slate-500">
                     {chat.viewer}
                   </p>
                   <p className="mt-1 text-sm leading-6 text-slate-800">
                     {chat.message}
+                  </p>
+                </div>
+              ))}
+              {roomState.viewerMessages.map((chat) => (
+                <div
+                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
+                  key={chat.id}
+                >
+                  <p className="text-xs font-semibold text-teal-700">
+                    {chat.name}
+                  </p>
+                  <p className="mt-1 text-sm leading-6 text-slate-800">
+                    {chat.text}
                   </p>
                 </div>
               ))}

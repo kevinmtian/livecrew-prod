@@ -8,8 +8,17 @@ import {
   getActiveSkuDisplay,
   resolveSkuFromText,
 } from "@/lib/catalogue";
+import {
+  appendHostReply,
+  defaultLocalRoomState,
+  type LocalRoomState,
+  readLocalRoomState,
+  resetLocalRoomState,
+  setRoomActiveSku,
+  subscribeToLocalRoom,
+} from "@/lib/local-room";
 import { mockChat } from "@/lib/mock-data";
-import { useMemo, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 
 type LedgerEvent = {
   id: string;
@@ -133,6 +142,9 @@ export default function HostPage() {
   const [activeSkuId, setActiveSkuId] = useState<SkuId>(defaultActiveSkuId);
   const [scriptIndex, setScriptIndex] = useState(0);
   const [ledgerEvents, setLedgerEvents] = useState<LedgerEvent[]>(initialLedger);
+  const [roomState, setRoomState] =
+    useState<LocalRoomState>(defaultLocalRoomState);
+  const [replyInput, setReplyInput] = useState("");
   const [queueItems, setQueueItems] = useState<QueueItem[]>([
     {
       id: "queue-initial",
@@ -149,6 +161,19 @@ export default function HostPage() {
     [transcript],
   );
 
+  useEffect(() => {
+    function syncRoomState() {
+      const nextRoomState = readLocalRoomState();
+
+      setRoomState(nextRoomState);
+      setActiveSkuId(nextRoomState.activeSkuId);
+    }
+
+    syncRoomState();
+
+    return subscribeToLocalRoom(syncRoomState);
+  }, []);
+
   function appendLedger(event: LedgerEvent) {
     setLedgerEvents((currentEvents) => [
       {
@@ -157,6 +182,12 @@ export default function HostPage() {
       },
       ...currentEvents,
     ]);
+  }
+
+  function updateActiveSku(nextSkuId: SkuId) {
+    setActiveSkuId(nextSkuId);
+    setRoomActiveSku(nextSkuId);
+    setRoomState(readLocalRoomState());
   }
 
   function handleUseTranscriptMatch() {
@@ -170,7 +201,7 @@ export default function HostPage() {
       return;
     }
 
-    setActiveSkuId(transcriptMention.id);
+    updateActiveSku(transcriptMention.id);
     appendLedger({
       id: "evt-transcript-match",
       label: "Transcript scanned",
@@ -183,7 +214,7 @@ export default function HostPage() {
     const step = scriptedSteps[scriptIndex];
 
     setTranscript(step.transcript);
-    setActiveSkuId(step.activeSkuId);
+    updateActiveSku(step.activeSkuId);
     setQueueItems((currentItems) => [
       {
         ...step.queueItem,
@@ -197,9 +228,12 @@ export default function HostPage() {
 
   function handleResetDemo() {
     setTranscript(initialTranscript);
-    setActiveSkuId(defaultActiveSkuId);
+    updateActiveSku(defaultActiveSkuId);
+    resetLocalRoomState();
+    setRoomState(readLocalRoomState());
     setScriptIndex(0);
     setLedgerEvents(initialLedger);
+    setReplyInput("");
     setQueueItems([
       {
         id: "queue-initial",
@@ -209,6 +243,26 @@ export default function HostPage() {
         status: "Review",
       },
     ]);
+  }
+
+  function handleSendHostReply(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const trimmedReply = replyInput.trim();
+
+    if (!trimmedReply) {
+      return;
+    }
+
+    appendHostReply(trimmedReply);
+    setRoomState(readLocalRoomState());
+    setReplyInput("");
+    appendLedger({
+      id: "evt-host-reply",
+      label: "Host reply sent",
+      detail: `Host sent reply to viewer room: ${trimmedReply}`,
+      status: "complete",
+    });
   }
 
   return (
@@ -285,6 +339,22 @@ export default function HostPage() {
                   <p className="mt-1 text-sm text-slate-800">{chat.message}</p>
                 </div>
               ))}
+              {roomState.viewerMessages.map((chat) => (
+                <div
+                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
+                  key={chat.id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold text-teal-700">
+                      {chat.name}
+                    </p>
+                    <StatusPill tone="good">Synced</StatusPill>
+                  </div>
+                  <p className="mt-1 text-sm leading-6 text-slate-800">
+                    {chat.text}
+                  </p>
+                </div>
+              ))}
             </div>
           </Panel>
         </div>
@@ -321,7 +391,7 @@ export default function HostPage() {
                   }`}
                   key={sku.id}
                   onClick={() => {
-                    setActiveSkuId(sku.id);
+                    updateActiveSku(sku.id);
                     appendLedger({
                       id: "evt-manual-sku",
                       label: "Host override",
@@ -340,6 +410,32 @@ export default function HostPage() {
             </div>
           </Panel>
           <Panel title="AI Suggested Replies" eyebrow="Agent queue">
+            <form
+              className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3"
+              onSubmit={handleSendHostReply}
+            >
+              <label
+                className="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                htmlFor="host-reply"
+              >
+                Host reply
+              </label>
+              <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                <input
+                  className="min-h-10 flex-1 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-teal-500"
+                  id="host-reply"
+                  onChange={(event) => setReplyInput(event.target.value)}
+                  placeholder="Send a host reply to viewer"
+                  value={replyInput}
+                />
+                <button
+                  className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                  type="submit"
+                >
+                  Send reply
+                </button>
+              </div>
+            </form>
             <div className="space-y-3">
               {queueItems.map((item) => (
                 <div
