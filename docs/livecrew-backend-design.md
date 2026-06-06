@@ -8,9 +8,11 @@ The key product behavior is:
 
 ```text
 Host speaks naturally
--> agents understand the operating intent
+-> OpenAI realtime transcription creates host transcript events
+-> agents use OpenAI structured output to understand operating intent
 -> commerce state is validated and updated
 -> host and viewer UI update in real time
+-> viewer watches the host browser camera/microphone stream
 -> all actions are recorded in an event ledger
 ```
 
@@ -24,12 +26,13 @@ Supported host-driven actions for the MVP:
 - Create or cancel a limited-time flash sale.
 - Publish a live announcement.
 - Override an incorrect SKU, reply, order, price, or promotion.
+- Submit typed text commands to CoHostAgent for debugging and fallback operation.
 
-The system should prefer reliable operations over agent freedom. LLMs may understand host language later, but they must not directly mutate commerce state.
+The system should prefer reliable operations over agent freedom. LLMs may understand host and viewer language, but they must not directly mutate commerce state.
 
 ## 2. Technology Stack
 
-Recommended stack:
+Required backend stack:
 
 ```text
 Python
@@ -38,6 +41,7 @@ Pydantic
 LangGraph
 In-memory state
 Server-Sent Events
+Browser WebRTC media streaming
 ```
 
 Initial dependencies:
@@ -48,22 +52,17 @@ uvicorn
 pydantic
 langgraph
 python-dotenv
-```
-
-Optional dependencies for the later OpenAI step:
-
-```text
-langchain
-langchain-openai
 openai
 ```
+
+Frontend stack remains Next.js App Router, TypeScript, and Tailwind CSS. Frontend code may capture browser media, render UI, call backend routes, subscribe to backend realtime events, and host minimal proxy routes when needed. Frontend code must not become the source of truth for agent decisions, commerce state, OpenAI API calls, ledger events, report metrics, or guardrail outcomes.
 
 Do not use these for the MVP unless explicitly requested:
 
 - PostgreSQL
 - Redis
 - Celery
-- WebSocket room infrastructure
+- Production WebSocket room infrastructure beyond simple media signaling
 - Vector databases
 - Real commerce APIs
 - LangChain `create_agent` free-form loops
@@ -98,6 +97,21 @@ In-memory commerce state + event ledger
 SSE realtime broadcast
 ```
 
+Browser media path:
+
+```text
+/host browser getUserMedia camera + microphone
+        |
+        v
+WebRTC peer connection
+        |
+        v
+/viewer video/audio playback
+
+FastAPI only coordinates lightweight signaling.
+Raw media should not be relayed through the commerce backend.
+```
+
 Responsibilities:
 
 - FastAPI exposes HTTP and SSE endpoints.
@@ -108,6 +122,24 @@ Responsibilities:
 - Commerce service is the only module allowed to mutate state.
 - Ledger records every applied or blocked action.
 - SSE pushes state changes to `/host` and `/viewer`.
+- Host typed debug commands enter the same workflow as finalized transcript events.
+- Browser-native media capture provides the host camera/microphone stream to viewers.
+- Media signaling coordinates host and viewer sessions but does not persist or inspect raw audio/video.
+- OpenAI API calls for transcription, structured action extraction, grounded reply drafting, and report narrative generation are server-side backend responsibilities.
+- Next.js should call the Python backend instead of implementing agent or commerce logic in API routes.
+
+### Document-Driven Backend Rule
+
+Backend implementation must follow this document. If the implementation needs to diverge from the documented route, model, graph node, or module boundary, update this document before changing code.
+
+Rules:
+
+- Add or update the requirement in `docs/livecrew-feature-requirements.md` before adding user-visible behavior.
+- Add or update this design document before adding backend modules, routes, models, graph edges, action types, or ledger event shapes.
+- Keep `backend/` as the home for FastAPI routes, LangGraph orchestration, agents, guardrails, commerce state, ledger, OpenAI integration, evaluation, and media signaling.
+- Keep Next.js focused on `/host`, `/viewer`, `/agent_evaluation`, browser media capture, UI state rendering, and client calls to the Python backend.
+- Do not implement a parallel source of truth in browser local storage or Next.js API routes once the Python backend contract exists.
+- Every completed feature should be traceable to a requirement, a backend contract, an implementation module, and a verification check.
 
 ## 4. Module Layout
 
@@ -118,6 +150,7 @@ backend/
   state.py
   ledger.py
   realtime.py
+  media_signaling.py
   commerce.py
   confirmations.py
 
@@ -154,6 +187,7 @@ Module responsibilities:
 - `state.py`: In-memory state container and reset helpers.
 - `ledger.py`: Append-only ledger helpers.
 - `realtime.py`: SSE broadcaster and subscriber queue management.
+- `media_signaling.py`: Ephemeral host/viewer signaling for browser media sessions.
 - `commerce.py`: Only state writer for product, price, sale, order, and announcement actions.
 - `confirmations.py`: Pending host-confirmation queue for risky, ambiguous, or low-confidence actions.
 - `data/catalogue.py`: Seeded product catalogue.
@@ -223,9 +257,9 @@ Important rules:
 - Pending actions represent proposals waiting for host approval and must not change commerce state.
 - Reset restores SKUs to seeded stock and prices, then clears orders, flash sale, active SKU, announcements, pending actions, metrics, and ledger.
 
-## 7. Host Transcript as Action Stream
+## 7. Host Transcript and Text Commands as Action Stream
 
-The host transcript is the primary operating interface.
+The host transcript is the primary operating interface. The host cockpit also provides a typed text command input for debugging and fallback operation.
 
 Examples:
 
@@ -242,11 +276,16 @@ Examples:
 "For the next five minutes, first 20 buyers get it at 18.8."
 -> create_flash_sale for active SKU
 
+"设置Vitamin C促销，限时3min，限价10元，限量10个"
+-> set_active_sku for GlowFix Vitamin C Serum
+-> create_flash_sale for GlowFix Vitamin C Serum
+
 "Cancel the flash deal."
 -> cancel_flash_sale
 ```
 
 Host transcript processing should support one proposed action or multiple proposed actions in a single utterance.
+CoHostAgent should use OpenAI structured output for primary host intent extraction and return proposed actions in utterance order. Deterministic parsing remains a fallback when OpenAI is unavailable, times out, or returns invalid structured output; fallback output still passes through the same guardrails and commerce service.
 
 Example:
 
@@ -289,6 +328,14 @@ Expected structured actions:
 ]
 ```
 
+Typed text command rules:
+
+- Typed commands enter the graph as `host_text_command` events.
+- Typed commands use the same CoHostAgent, structured action schema, guardrails, confirmation gate, commerce service, ledger, and realtime broadcast path as finalized transcript events.
+- Typed commands should carry `input_source: "typed_command"` so the UI and ledger can distinguish them from speech transcription.
+- Typed commands are allowed when microphone capture, OpenAI realtime transcription, or camera permission is unavailable.
+- Typed commands must never bypass SKU grounding, pricing policy, stock checks, unsupported-claim checks, or host confirmation.
+
 ## 8. Unified Action Model
 
 ```python
@@ -323,6 +370,7 @@ class ProposedAction(BaseModel):
     ] | None = None
     target_event_id: str | None = None
     source_text: str
+    input_source: Literal["speech_transcript", "typed_command", "viewer_message", "host_ui"]
     confidence: float
     reason: str | None = None
     evidence: list[str] = []
@@ -343,7 +391,7 @@ class PendingAction(BaseModel):
 
 All realtime agents must return only structured `ProposedAction` objects plus optional natural-language explanations for the UI. Agents may propose actions, but they must never execute them.
 
-Later OpenAI integration should use structured output for this same shape. The output must still pass deterministic SKU resolution, validation, and commerce guardrails before execution.
+OpenAI integration should use structured output for this same shape. The output must still pass deterministic SKU resolution, validation, and commerce guardrails before execution.
 
 Action ownership:
 
@@ -397,6 +445,7 @@ Responsibilities:
 
 - Understand host operating intent from natural transcript.
 - Split a transcript into one or more proposed actions.
+- Use OpenAI structured output as the primary extraction path for host operations, including multilingual and mixed-language phrasing.
 - Resolve explicit product mentions using shared SKU tools.
 - Use active SKU only for contextual references like "this one" or "the current product".
 - Propose product listing, price, flash-sale, announcement, and override actions.
@@ -530,6 +579,7 @@ Event routing:
 
 ```text
 host_transcript   -> cohost_agent_node
+host_text_command -> cohost_agent_node
 viewer_message    -> concierge_agent_node
 host_confirmation -> direct_host_action_node
 host_override     -> direct_host_action_node
@@ -541,6 +591,7 @@ reset             -> commerce_apply_node
 Routing rules:
 
 - Host transcript always enters `CoHostAgent`.
+- Host text command always enters `CoHostAgent` and is treated as a debug/fallback host operation input.
 - Viewer message always enters `ConciergeAgent`.
 - Report request enters `ProducerAgent` and skips commerce mutation unless the report itself is recorded in the ledger.
 - Direct host UI actions may skip LLM agents and enter guardrails as prebuilt proposed actions.
@@ -558,6 +609,7 @@ POST /reset
 GET  /events/stream
 
 POST /events/host-transcript
+POST /events/host-command
 POST /events/viewer-message
 
 POST /commerce/flash-sale
@@ -569,6 +621,12 @@ POST /actions/host-override
 
 GET  /report
 POST /api/eval/run-agent-suite
+
+POST /media/session
+POST /media/session/{session_id}/offer
+POST /media/session/{session_id}/answer
+POST /media/session/{session_id}/ice-candidate
+DELETE /media/session/{session_id}
 ```
 
 `/api/eval/run-agent-suite` is the intended app route. If the Python backend is running, the Next.js route may proxy to an internal FastAPI `/eval/run-agent-suite` endpoint.
@@ -595,6 +653,21 @@ Response:
   "state": {}
 }
 ```
+
+### `POST /events/host-command`
+
+Typed debug command endpoint. It should normalize the request into the same workflow shape as a finalized host transcript while preserving the source as `typed_command`.
+
+Request:
+
+```json
+{
+  "text": "Switch to the sleep mask.",
+  "source": "typed_command"
+}
+```
+
+Response should use the shared `WorkflowResponse` shape and include proposed actions, guardrail results, pending confirmations, ledger entries, and updated state.
 
 ### `POST /events/viewer-message`
 
@@ -646,6 +719,8 @@ class RealtimeEvent(BaseModel):
 
 Typical updates:
 
+- `host_stream_started`
+- `host_stream_stopped`
 - `list_product`
 - `price_updated`
 - `create_flash_sale`
@@ -660,7 +735,38 @@ Typical updates:
 
 The host and viewer pages subscribe to the same stream.
 
-## 13. Flash Sale Rules
+## 13. Host Media Streaming
+
+The host camera and microphone stream is a browser media feature, not a commerce state mutation.
+
+Frontend behavior:
+
+- `/host` uses browser media permissions to access the Mac camera and microphone.
+- `/host` shows a local preview and start/stop controls.
+- `/viewer` plays the live host video/audio stream.
+- `/viewer` renders the customer experience as a phone-style livestream room.
+- `/viewer` reserves the upper two-thirds of the phone frame for host video and product information.
+- `/viewer` reserves the lower one-third of the phone frame for viewer chat.
+- Active product information displayed on `/viewer` must come from backend `active_sku_id` and SKU facts, with local demo state only as fallback.
+- Viewer media playback should clearly show connecting, live, muted, offline, and permission/error states.
+- Host audio should be reusable for OpenAI realtime transcription and viewer playback.
+
+Transport behavior:
+
+- Use browser-native `getUserMedia` for camera and microphone capture.
+- Use WebRTC peer connection for host-to-viewer media transport.
+- Use the backend only for lightweight signaling such as session creation, offer, answer, and ICE candidate exchange.
+- Do not route raw audio/video through the commerce service, ledger, or OpenAI agent workflow.
+- Do not record, store, replay, or upload raw media unless a later requirement explicitly adds recording.
+
+Backend behavior:
+
+- `media_signaling.py` stores ephemeral session metadata only.
+- Media sessions should be resettable and should expire when the host stops streaming or refreshes for too long.
+- Media state changes may broadcast lightweight realtime events such as `host_stream_started` and `host_stream_stopped`.
+- Media failures should not block commerce state, viewer chat, product shelf updates, or agent workflows.
+
+## 14. Flash Sale Rules
 
 ```python
 class FlashSale(BaseModel):
@@ -696,7 +802,7 @@ else:
   unit_price_cents = sku.current_price_cents
 ```
 
-## 14. Price Update Rules
+## 15. Price Update Rules
 
 `update_price` changes a SKU's regular live price:
 
@@ -713,7 +819,7 @@ sku.current_price_cents = sku.base_price_cents
 
 Restoring regular price does not cancel an active flash sale. If both happen in one transcript, proposed actions execute in extracted order after guardrail approval.
 
-## 15. Ledger
+## 16. Ledger
 
 Ledger event types:
 
@@ -753,7 +859,7 @@ The ledger is the evidence layer for timeline UI, evaluation, and post-stream re
 
 For Producer reports, listed SKUs must be derived from `list_product` and `create_flash_sale` ledger events. `active_sku_changed` may be retained as a realtime event name, but report calculations should use the ledger event names above. Reset clears the current session ledger instead of adding a `state_reset` entry to it.
 
-## 16. Evaluation
+## 17. Evaluation
 
 `POST /api/eval/run-agent-suite` should run deterministic cases without LLM calls. If the FastAPI backend is active, the Next.js route can proxy to an internal backend endpoint.
 
@@ -780,21 +886,38 @@ Evaluation output should include:
 - Actual action or decision.
 - Failure reason.
 
-## 17. LLM Integration Plan
+## 18. LLM Integration Plan
 
 Phase 1:
 
 ```text
-Deterministic parser only.
-No OpenAI dependency.
+Deterministic backend contracts, catalogue grounding, commerce service, guardrails, and eval cases.
+Typed host command input and viewer chat fallback remain available for demo reliability.
 ```
 
 Phase 2:
 
 ```text
-CoHostAgent and ConciergeAgent use LLM structured output to produce ProposedAction[].
-Deterministic parser remains fallback.
+OpenAI realtime transcription turns host microphone input into transcript events.
+CoHostAgent, ConciergeAgent, and ProducerAgent use OpenAI structured output for their agent tasks.
+Deterministic parsing and validation remain fallback and safety checks.
 ```
+
+Runtime configuration:
+
+- Read `OPENAI_API_KEY` from `.env`.
+- Keep the key server-side only.
+- Do not send the API key to the browser.
+- Use a backend endpoint or short-lived client token pattern for browser microphone transcription, rather than exposing the long-lived API key.
+- Surface missing or invalid API key setup clearly in the host cockpit.
+
+Realtime transcription requirements:
+
+- Host microphone audio should use the OpenAI Realtime API for transcription.
+- WebRTC is preferred for browser microphone capture when practical; server-side WebSocket bridging is acceptable for a hackathon fallback.
+- Only completed or finalized transcript segments should trigger CoHostAgent action generation.
+- Partial transcript deltas may be displayed in the UI as in-progress text.
+- Typed host commands should remain available as a no-microphone debugging path.
 
 Hard constraints:
 
@@ -803,30 +926,38 @@ Hard constraints:
 - LLM cannot bypass guardrails.
 - LLM cannot override SKU resolver, stock, price, order quantity, or backend metrics.
 - Low-confidence LLM output must require host confirmation.
+- Invalid or malformed LLM structured output must be rejected and logged.
 
-## 18. Implementation Order
+## 19. Implementation Order
 
 Recommended build sequence:
 
-1. FastAPI backend skeleton.
-2. Pydantic models.
-3. Seeded catalogue.
-4. In-memory state and reset.
-5. Ledger append helpers.
-6. Pending host-confirmation queue.
-7. Commerce service for active SKU, price update, flash sale, order, announcement.
-8. Deterministic SKU resolver and quantity extractor.
-9. Deterministic CoHostAgent.
-10. Deterministic ConciergeAgent.
-11. GuardrailNode and policy modules.
-12. LangGraph workflow with confirmation gate.
-13. API routes.
-14. SSE realtime stream.
-15. ProducerAgent report.
-16. Evaluation suite.
-17. Optional OpenAI structured action extraction inside CoHostAgent and ConciergeAgent.
+1. Confirm or update `docs/livecrew-feature-requirements.md` and this design document for the feature being built.
+2. FastAPI backend skeleton.
+3. Pydantic models.
+4. Seeded catalogue.
+5. In-memory state and reset.
+6. Ledger append helpers.
+7. Pending host-confirmation queue.
+8. Commerce service for active SKU, price update, flash sale, order, announcement.
+9. Deterministic SKU resolver and quantity extractor.
+10. Deterministic CoHostAgent.
+11. Deterministic ConciergeAgent.
+12. GuardrailNode and policy modules.
+13. LangGraph workflow with confirmation gate.
+14. API routes.
+15. SSE realtime stream.
+16. ProducerAgent report.
+17. Evaluation suite.
+18. OpenAI API key loading and server-side OpenAI client.
+19. OpenAI realtime transcription bridge for host microphone input.
+20. Host typed command endpoint wired to CoHostAgent.
+21. Host camera/microphone capture UI.
+22. Lightweight WebRTC signaling and viewer playback.
+23. OpenAI structured action extraction inside CoHostAgent and ConciergeAgent.
+24. OpenAI-assisted ProducerAgent report narrative.
 
-## 19. Design Principle
+## 20. Design Principle
 
 The final backend boundary is:
 
