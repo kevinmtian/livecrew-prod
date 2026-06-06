@@ -270,6 +270,9 @@ Examples:
 "Drop the tumbler to 22 dollars."
 -> update_price for Bamboo Thermal Tumbler
 
+"Set the tumbler stock to 60."
+-> update_stock for Bamboo Thermal Tumbler
+
 "Restore the sunscreen cushion to original price."
 -> restore_price for HydraMist Cushion SPF
 
@@ -343,6 +346,7 @@ class ProposedAction(BaseModel):
     type: Literal[
         "set_active_sku",
         "update_price",
+        "update_stock",
         "restore_price",
         "create_flash_sale",
         "cancel_flash_sale",
@@ -356,6 +360,7 @@ class ProposedAction(BaseModel):
     sku_id: str | None = None
     quantity: int | None = None
     price_cents: int | None = None
+    stock: int | None = None
     sale_price_cents: int | None = None
     duration_seconds: int | None = None
     stock_limit: int | None = None
@@ -409,10 +414,12 @@ Host confirmation is a backend workflow, not a frontend-only display state.
 Rules:
 
 - Guardrails convert ambiguous, low-confidence, or risky actions into pending actions.
+- `noop` and non-actionable host speech must never enter the pending confirmation queue.
 - Pending actions are stored in `CommerceState.pending_actions` and broadcast to the host cockpit.
 - Pending actions do not mutate SKU, price, promotion, order, stock, or KPI state.
 - Approving a pending action sends the original action back through guardrails with approval context, then into the commerce service.
 - Rejecting a pending action marks it rejected and appends a ledger event.
+- The host cockpit must render pending actions with approve and reject controls backed by the `/actions/{pending_action_id}/approve` and `/actions/{pending_action_id}/reject` endpoints.
 - Host override may replace the pending action with a corrected action, which still passes through guardrails before execution.
 - Reset clears all pending actions.
 
@@ -499,7 +506,7 @@ Responsibilities:
 Suggested risk policy:
 
 - Low risk: list active SKU, grounded answer, routine announcement.
-- Medium risk: price update, flash-sale creation, order creation.
+- Medium risk: price update, stock update, flash-sale creation, order creation.
 - High risk: very deep discount, unclear SKU, unclear quantity, unsupported claims, medical claims, authenticity promises, delivery promises.
 
 GuardrailNode is not an agent. It should be deterministic and policy-driven where possible. If an LLM is later used to help with judgment, its result must still be constrained by deterministic policy checks.
@@ -512,6 +519,7 @@ Allowed actions:
 
 - `set_active_sku`
 - `update_price`
+- `update_stock`
 - `restore_price`
 - `create_flash_sale`
 - `cancel_flash_sale`
@@ -631,6 +639,8 @@ DELETE /media/session/{session_id}
 
 `/api/eval/run-agent-suite` is the intended app route. If the Python backend is running, the Next.js route may proxy to an internal FastAPI `/eval/run-agent-suite` endpoint.
 
+Local FastAPI CORS should allow the primary Next.js dev origin `localhost:3000` and the fallback origin `localhost:3001`, including `127.0.0.1` variants, so the demo remains usable when one dev port is already occupied.
+
 ### `POST /events/host-transcript`
 
 Request:
@@ -723,6 +733,7 @@ Typical updates:
 - `host_stream_stopped`
 - `list_product`
 - `price_updated`
+- `stock_updated`
 - `create_flash_sale`
 - `flash_sale_cancelled`
 - `order_created`
@@ -819,7 +830,18 @@ sku.current_price_cents = sku.base_price_cents
 
 Restoring regular price does not cancel an active flash sale. If both happen in one transcript, proposed actions execute in extracted order after guardrail approval.
 
-## 16. Ledger
+## 16. Stock Update Rules
+
+`update_stock` changes a SKU's current sellable stock:
+
+- Stock must be a non-negative integer.
+- The action must reference a grounded SKU, using the active SKU only for contextual host phrases.
+- Stock changes must write `stock_updated` ledger events.
+- Stock changes must not alter price, active SKU, orders, or flash-sale pricing.
+- If an active flash sale exists for the same SKU and its remaining stock is greater than the new SKU stock, the commerce service should cap `flash_sale.remaining_stock` to the new SKU stock.
+- Viewer replies and product overlays must cite current backend stock, not catalogue assumptions.
+
+## 17. Ledger
 
 Ledger event types:
 
@@ -859,7 +881,7 @@ The ledger is the evidence layer for timeline UI, evaluation, and post-stream re
 
 For Producer reports, listed SKUs must be derived from `list_product` and `create_flash_sale` ledger events. `active_sku_changed` may be retained as a realtime event name, but report calculations should use the ledger event names above. Reset clears the current session ledger instead of adding a `state_reset` entry to it.
 
-## 17. Evaluation
+## 18. Evaluation
 
 `POST /api/eval/run-agent-suite` should run deterministic cases without LLM calls. If the FastAPI backend is active, the Next.js route can proxy to an internal backend endpoint.
 
@@ -886,7 +908,7 @@ Evaluation output should include:
 - Actual action or decision.
 - Failure reason.
 
-## 18. LLM Integration Plan
+## 19. LLM Integration Plan
 
 Phase 1:
 
@@ -916,7 +938,8 @@ Realtime transcription requirements:
 - Host microphone audio should use the OpenAI Realtime API for transcription.
 - WebRTC is preferred for browser microphone capture when practical; server-side WebSocket bridging is acceptable for a hackathon fallback.
 - Only completed or finalized transcript segments should trigger CoHostAgent action generation.
-- Partial transcript deltas may be displayed in the UI as in-progress text.
+- In-progress transcript text should be displayed in the host livestream panel while the host is speaking.
+- A browser-side interim caption preview is acceptable for demo responsiveness as long as only finalized transcript text enters the backend workflow.
 - Typed host commands should remain available as a no-microphone debugging path.
 
 Hard constraints:
@@ -928,7 +951,7 @@ Hard constraints:
 - Low-confidence LLM output must require host confirmation.
 - Invalid or malformed LLM structured output must be rejected and logged.
 
-## 19. Implementation Order
+## 20. Implementation Order
 
 Recommended build sequence:
 
@@ -957,7 +980,7 @@ Recommended build sequence:
 23. OpenAI structured action extraction inside CoHostAgent and ConciergeAgent.
 24. OpenAI-assisted ProducerAgent report narrative.
 
-## 20. Design Principle
+## 21. Design Principle
 
 The final backend boundary is:
 

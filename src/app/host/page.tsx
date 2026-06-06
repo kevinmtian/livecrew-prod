@@ -20,18 +20,20 @@ import {
 } from "@/lib/local-room";
 import {
   type BackendState,
+  type PendingAction,
   type WorkflowResponse,
+  approvePendingAction,
   createMediaSession,
   fetchBackendState,
   fetchMediaSession,
   getBackendUrl,
   postIceCandidate,
   postMediaOffer,
+  rejectPendingAction,
   resetBackendState,
   sendHostCommand,
   sendHostTranscript,
   stopMediaSession,
-  transcribeAudio,
 } from "@/lib/livecrew-api";
 import { mockChat } from "@/lib/mock-data";
 import { type FormEvent, useEffect, useRef, useState } from "react";
@@ -50,8 +52,55 @@ type QueueItem = {
   status: "Draft" | "Review" | "Blocked";
 };
 
-const initialTranscript =
-  "Today we are starting with GlowFix Vitamin C Serum. It is a brightening serum in a 30 ml bottle.";
+type LiveTranscriptLine = {
+  id: string;
+  text: string;
+  status: "final" | "error";
+};
+
+type BrowserSpeechRecognitionAlternative = {
+  transcript: string;
+};
+
+type BrowserSpeechRecognitionResult = {
+  isFinal: boolean;
+  0: BrowserSpeechRecognitionAlternative;
+};
+
+type BrowserSpeechRecognitionResultList = {
+  length: number;
+  [index: number]: BrowserSpeechRecognitionResult;
+};
+
+type BrowserSpeechRecognitionEvent = Event & {
+  resultIndex: number;
+  results: BrowserSpeechRecognitionResultList;
+};
+
+type BrowserSpeechRecognitionErrorEvent = Event & {
+  error: string;
+};
+
+type BrowserSpeechRecognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  abort: () => void;
+  start: () => void;
+  stop: () => void;
+  onend: (() => void) | null;
+  onerror: ((event: BrowserSpeechRecognitionErrorEvent) => void) | null;
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
+  onstart: (() => void) | null;
+};
+
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
+
+type SpeechWindow = Window &
+  typeof globalThis & {
+    SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  };
 
 const initialLedger: LedgerEvent[] = [
   {
@@ -70,6 +119,11 @@ function getValidSkuId(value: string | null | undefined): SkuId {
   return (resolveSkuById(value)?.id ?? defaultActiveSkuId) as SkuId;
 }
 
+function getActiveStockInputValue(state: BackendState) {
+  const sku = state.skus.find((stateSku) => stateSku.id === state.active_sku_id);
+  return sku ? String(sku.stock) : "";
+}
+
 function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
   return response.ledger_entries.map((entry) => ({
     id: entry.id,
@@ -77,14 +131,38 @@ function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
     detail: entry.detail,
     status: entry.type.includes("block")
       ? "blocked"
-      : entry.type.includes("confirmation")
+      : entry.type === "host_confirmation_requested"
         ? "pending"
         : "complete",
   }));
 }
 
+function formatActionName(type: string) {
+  return type.replaceAll("_", " ");
+}
+
+function describePendingAction(pending: PendingAction, state: BackendState | null) {
+  const { action } = pending;
+  const skuName =
+    state?.skus.find((sku) => sku.id === action.sku_id)?.name ?? action.sku_id;
+  const details = [
+    pending.guardrail_result.reason,
+    skuName ? `SKU: ${skuName}` : null,
+    action.price_cents ? `Price: ${formatPrice(action.price_cents)}` : null,
+    action.stock !== null && action.stock !== undefined
+      ? `Stock: ${action.stock}`
+      : null,
+    action.sale_price_cents
+      ? `Flash sale: ${formatPrice(action.sale_price_cents)}`
+      : null,
+    action.stock_limit ? `Limit: ${action.stock_limit}` : null,
+    action.duration_seconds ? `Duration: ${action.duration_seconds}s` : null,
+  ].filter(Boolean);
+
+  return details.join(" · ");
+}
+
 export default function HostPage() {
-  const [transcript, setTranscript] = useState(initialTranscript);
   const [commandInput, setCommandInput] = useState(
     "Switch to the Bamboo Thermal Tumbler.",
   );
@@ -97,11 +175,15 @@ export default function HostPage() {
   const [roomState, setRoomState] =
     useState<LocalRoomState>(defaultLocalRoomState);
   const [replyInput, setReplyInput] = useState("");
+  const [stockInput, setStockInput] = useState(
+    String(getActiveSkuDisplay(defaultActiveSkuId).stock),
+  );
+  const [stockSaving, setStockSaving] = useState(false);
   const [queueItems, setQueueItems] = useState<QueueItem[]>([
     {
       id: "queue-initial",
       title: "Waiting for CoHostAgent",
-      detail: "Submit a typed command or speech transcript to call the Python LangGraph backend.",
+      detail: "Submit a typed command or speak live to call the Python LangGraph backend.",
       status: "Review",
     },
   ]);
@@ -110,20 +192,33 @@ export default function HostPage() {
     "offline" | "starting" | "live"
   >("offline");
   const [mediaError, setMediaError] = useState("");
-  const [recordingStatus, setRecordingStatus] = useState<
-    "idle" | "recording" | "transcribing"
+  const [resolvingActionId, setResolvingActionId] = useState<string | null>(null);
+  const [liveTranscriptLines, setLiveTranscriptLines] = useState<
+    LiveTranscriptLine[]
+  >([]);
+  const [interimTranscript, setInterimTranscript] = useState("");
+  const [liveTranscriptStatus, setLiveTranscriptStatus] = useState<
+    "idle" | "listening" | "unsupported" | "error"
   >("idle");
+  const [liveTranscriptError, setLiveTranscriptError] = useState("");
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const answerPollRef = useRef<number | null>(null);
   const viewerCandidateCountRef = useRef(0);
+  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const shouldListenForSpeechRef = useRef(false);
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
   const backendActiveSku = backendState?.skus.find(
     (sku) => sku.id === backendState.active_sku_id,
   );
+  const pendingConfirmations =
+    backendState?.pending_actions.filter(
+      (pending) => pending.status === "pending" && pending.action.type !== "noop",
+    ) ??
+    [];
 
   useEffect(() => {
     function syncRoomState() {
@@ -140,6 +235,7 @@ export default function HostPage() {
         window.clearInterval(answerPollRef.current);
       }
       unsubscribe();
+      stopLiveSpeechRecognition();
       peerRef.current?.close();
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
@@ -150,6 +246,7 @@ export default function HostPage() {
       const state = await fetchBackendState();
       setBackendState(state);
       setBackendStatus("online");
+      setStockInput(getActiveStockInputValue(state));
       const nextSkuId = getValidSkuId(state.active_sku_id);
       setActiveSkuId(nextSkuId);
       setRoomActiveSku(nextSkuId);
@@ -168,8 +265,153 @@ export default function HostPage() {
     ]);
   }
 
+  function appendLiveTranscriptLine(text: string, status: LiveTranscriptLine["status"]) {
+    const trimmedText = text.trim();
+    if (!trimmedText) {
+      return;
+    }
+
+    setLiveTranscriptLines((currentLines) =>
+      [
+        {
+          id: `transcript-${Date.now()}-${Math.random()}`,
+          text: trimmedText,
+          status,
+        },
+        ...currentLines,
+      ].slice(0, 8),
+    );
+  }
+
+  async function processFinalSpeechTranscript(text: string) {
+    const trimmedText = text.trim();
+    if (!trimmedText) {
+      return;
+    }
+
+    appendLiveTranscriptLine(trimmedText, "final");
+    try {
+      const response = await sendHostTranscript(trimmedText);
+      applyWorkflowResponse(response);
+    } catch (error) {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : "Backend transcript event failed.";
+      appendLiveTranscriptLine(detail, "error");
+      appendLedger({
+        id: "evt-transcript-error",
+        label: "Transcript failed",
+        detail,
+        status: "blocked",
+      });
+      setBackendStatus("offline");
+    }
+  }
+
+  function stopLiveSpeechRecognition() {
+    shouldListenForSpeechRef.current = false;
+    const recognition = speechRecognitionRef.current;
+    speechRecognitionRef.current = null;
+    if (recognition) {
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      recognition.onstart = null;
+      recognition.abort();
+    }
+    setInterimTranscript("");
+    setLiveTranscriptStatus("idle");
+  }
+
+  function startLiveSpeechRecognition() {
+    const SpeechRecognition =
+      (window as SpeechWindow).SpeechRecognition ??
+      (window as SpeechWindow).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setLiveTranscriptStatus("unsupported");
+      setLiveTranscriptError("Live transcript preview is unavailable in this browser.");
+      return;
+    }
+
+    stopLiveSpeechRecognition();
+    setLiveTranscriptError("");
+    shouldListenForSpeechRef.current = true;
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = navigator.language || "en-US";
+    recognition.onstart = () => setLiveTranscriptStatus("listening");
+    recognition.onresult = (event) => {
+      const finalSegments: string[] = [];
+      const interimSegments: string[] = [];
+
+      for (let index = event.resultIndex; index < event.results.length; index += 1) {
+        const result = event.results[index];
+        const transcriptText = result[0]?.transcript.trim();
+        if (!transcriptText) {
+          continue;
+        }
+
+        if (result.isFinal) {
+          finalSegments.push(transcriptText);
+        } else {
+          interimSegments.push(transcriptText);
+        }
+      }
+
+      setInterimTranscript(interimSegments.join(" "));
+      finalSegments.forEach((segment) => {
+        void processFinalSpeechTranscript(segment);
+      });
+    };
+    recognition.onerror = (event) => {
+      if (event.error === "no-speech") {
+        return;
+      }
+
+      setLiveTranscriptStatus("error");
+      setLiveTranscriptError(`Live transcript error: ${event.error}`);
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        shouldListenForSpeechRef.current = false;
+      }
+    };
+    recognition.onend = () => {
+      if (!shouldListenForSpeechRef.current) {
+        setLiveTranscriptStatus("idle");
+        return;
+      }
+
+      window.setTimeout(() => {
+        if (
+          !shouldListenForSpeechRef.current ||
+          speechRecognitionRef.current !== recognition
+        ) {
+          return;
+        }
+        try {
+          recognition.start();
+        } catch {
+          setLiveTranscriptStatus("error");
+        }
+      }, 250);
+    };
+
+    speechRecognitionRef.current = recognition;
+    try {
+      recognition.start();
+    } catch {
+      setLiveTranscriptStatus("error");
+      setLiveTranscriptError("Unable to start live transcript preview.");
+    }
+  }
+
   function applyWorkflowResponse(response: WorkflowResponse) {
     setBackendState(response.state);
+    setBackendStatus("online");
+    setStockInput(getActiveStockInputValue(response.state));
     const nextSkuId = getValidSkuId(response.state.active_sku_id);
     setActiveSkuId(nextSkuId);
     setRoomActiveSku(nextSkuId);
@@ -178,20 +420,53 @@ export default function HostPage() {
       ...currentEvents,
     ]);
     setQueueItems((currentItems) => [
-      ...response.proposed_actions.map((action) => ({
-        id: `queue-${action.type}-${Date.now()}-${Math.random()}`,
-        title: action.type.replaceAll("_", " "),
-        detail: action.reason ?? "CoHostAgent produced a structured action.",
-        status:
-          response.guardrail_results.some(
+      ...response.proposed_actions
+        .filter((action) => action.type !== "noop")
+        .map((action) => ({
+          id: `queue-${action.type}-${Date.now()}-${Math.random()}`,
+          title: action.type.replaceAll("_", " "),
+          detail: action.reason ?? "CoHostAgent produced a structured action.",
+          status: response.guardrail_results.some(
             (result) =>
               result.action_type === action.type && result.status === "blocked",
           )
             ? ("Blocked" as const)
-            : ("Draft" as const),
-      })),
+            : response.guardrail_results.some(
+                  (result) =>
+                    result.action_type === action.type &&
+                    result.status === "needs_host_confirmation",
+                )
+              ? ("Review" as const)
+              : ("Draft" as const),
+        })),
       ...currentItems,
     ]);
+  }
+
+  async function handleResolvePendingAction(
+    pendingActionId: string,
+    resolution: "approve" | "reject",
+  ) {
+    setResolvingActionId(pendingActionId);
+    try {
+      const response =
+        resolution === "approve"
+          ? await approvePendingAction(pendingActionId)
+          : await rejectPendingAction(pendingActionId);
+      applyWorkflowResponse(response);
+    } catch (error) {
+      appendLedger({
+        id: "evt-confirmation-error",
+        label: "Confirmation failed",
+        detail:
+          error instanceof Error
+            ? error.message
+            : "Backend confirmation request failed.",
+        status: "blocked",
+      });
+    } finally {
+      setResolvingActionId(null);
+    }
   }
 
   async function handleSubmitCommand(event: FormEvent<HTMLFormElement>) {
@@ -204,7 +479,6 @@ export default function HostPage() {
     try {
       const response = await sendHostCommand(text);
       applyWorkflowResponse(response);
-      setTranscript(text);
       setCommandInput("");
     } catch (error) {
       appendLedger({
@@ -217,19 +491,34 @@ export default function HostPage() {
     }
   }
 
-  async function handleSubmitTranscript() {
+  async function handleUpdateStock(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const stock = Number(stockInput);
+    if (!Number.isInteger(stock) || stock < 0) {
+      appendLedger({
+        id: "evt-stock-invalid",
+        label: "Stock update blocked",
+        detail: "Stock must be a non-negative whole number.",
+        status: "blocked",
+      });
+      return;
+    }
+
+    setStockSaving(true);
     try {
-      const response = await sendHostTranscript(transcript);
+      const response = await sendHostCommand(`Set this product stock to ${stock}.`);
       applyWorkflowResponse(response);
     } catch (error) {
       appendLedger({
-        id: "evt-transcript-error",
-        label: "Transcript failed",
+        id: "evt-stock-error",
+        label: "Stock update failed",
         detail:
-          error instanceof Error ? error.message : "Backend transcript event failed.",
+          error instanceof Error ? error.message : "Backend stock update failed.",
         status: "blocked",
       });
       setBackendStatus("offline");
+    } finally {
+      setStockSaving(false);
     }
   }
 
@@ -237,20 +526,23 @@ export default function HostPage() {
     try {
       const state = await resetBackendState();
       setBackendState(state);
+      setStockInput(getActiveStockInputValue(state));
       setActiveSkuId(getValidSkuId(state.active_sku_id));
     } catch {
       setBackendStatus("offline");
     }
     resetLocalRoomState();
     setRoomState(readLocalRoomState());
-    setTranscript(initialTranscript);
     setCommandInput("Switch to the Bamboo Thermal Tumbler.");
+    setLiveTranscriptLines([]);
+    setInterimTranscript("");
+    setLiveTranscriptError("");
     setLedgerEvents(initialLedger);
     setQueueItems([
       {
         id: "queue-initial",
         title: "Waiting for CoHostAgent",
-        detail: "Submit a typed command or speech transcript to call the Python LangGraph backend.",
+        detail: "Submit a typed command or speak live to call the Python LangGraph backend.",
         status: "Review",
       },
     ]);
@@ -293,6 +585,7 @@ export default function HostPage() {
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
+      startLiveSpeechRecognition();
 
       const session = await createMediaSession();
       setMediaSessionId(session.session_id);
@@ -331,6 +624,7 @@ export default function HostPage() {
         }
       }, 1000);
     } catch (error) {
+      stopLiveSpeechRecognition();
       setStreamStatus("offline");
       setHostMediaSession(null, "offline");
       setMediaError(
@@ -344,6 +638,7 @@ export default function HostPage() {
       window.clearInterval(answerPollRef.current);
       answerPollRef.current = null;
     }
+    stopLiveSpeechRecognition();
     peerRef.current?.close();
     peerRef.current = null;
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -359,45 +654,12 @@ export default function HostPage() {
     setHostMediaSession(null, "offline");
   }
 
-  async function recordAndTranscribe() {
-    const stream = localStreamRef.current;
-    if (!stream || typeof MediaRecorder === "undefined") {
-      setMediaError("Start the host stream before recording audio.");
-      return;
-    }
-
-    const chunks: Blob[] = [];
-    const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-    setRecordingStatus("recording");
-    recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        chunks.push(event.data);
-      }
-    };
-    recorder.onstop = async () => {
-      setRecordingStatus("transcribing");
-      try {
-        const result = await transcribeAudio(new Blob(chunks, { type: "audio/webm" }));
-        setTranscript(result.text);
-        const response = await sendHostTranscript(result.text);
-        applyWorkflowResponse(response);
-      } catch (error) {
-        appendLedger({
-          id: "evt-transcribe-error",
-          label: "Transcription failed",
-          detail:
-            error instanceof Error
-              ? error.message
-              : "OpenAI transcription request failed.",
-          status: "blocked",
-        });
-      } finally {
-        setRecordingStatus("idle");
-      }
-    };
-    recorder.start();
-    window.setTimeout(() => recorder.stop(), 4000);
-  }
+  const liveTranscriptTone =
+    liveTranscriptStatus === "listening"
+      ? "good"
+      : liveTranscriptStatus === "unsupported" || liveTranscriptStatus === "error"
+        ? "warning"
+        : "neutral";
 
   return (
     <AppShell
@@ -461,18 +723,50 @@ export default function HostPage() {
               >
                 Stop stream
               </button>
-              <button
-                className="min-h-10 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm font-semibold text-slate-700 transition hover:bg-white disabled:text-slate-400"
-                disabled={recordingStatus !== "idle"}
-                onClick={() => void recordAndTranscribe()}
-                type="button"
-              >
-                {recordingStatus === "idle" ? "Record 4s" : recordingStatus}
-              </button>
             </div>
             {mediaError ? (
               <p className="mt-3 text-sm leading-6 text-amber-700">{mediaError}</p>
             ) : null}
+            <div
+              aria-live="polite"
+              className="mt-4 min-h-48 rounded-md border-4 border-red-400 bg-white p-3"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-semibold text-slate-900">
+                  Live transcript
+                </p>
+                <StatusPill tone={liveTranscriptTone}>
+                  {liveTranscriptStatus}
+                </StatusPill>
+              </div>
+              <div className="mt-3 space-y-2 text-sm leading-6">
+                {interimTranscript ? (
+                  <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-slate-700">
+                    {interimTranscript}
+                  </p>
+                ) : null}
+                {liveTranscriptLines.map((line) => (
+                  <p
+                    className={`rounded-md border px-3 py-2 ${
+                      line.status === "error"
+                        ? "border-amber-200 bg-amber-50 text-amber-800"
+                        : "border-slate-200 bg-slate-50 text-slate-800"
+                    }`}
+                    key={line.id}
+                  >
+                    {line.text}
+                  </p>
+                ))}
+                {!interimTranscript && liveTranscriptLines.length === 0 ? (
+                  <p className="text-sm text-slate-400">Waiting for host speech.</p>
+                ) : null}
+              </div>
+              {liveTranscriptError ? (
+                <p className="mt-3 text-sm leading-6 text-amber-700">
+                  {liveTranscriptError}
+                </p>
+              ) : null}
+            </div>
           </Panel>
 
           <Panel title="CoHost Text Command" eyebrow="Debug input">
@@ -493,21 +787,6 @@ export default function HostPage() {
                 Send to CoHost
               </button>
             </form>
-          </Panel>
-
-          <Panel title="Host Transcript" eyebrow="Speech transcript">
-            <textarea
-              className="min-h-28 w-full resize-y rounded-md border border-slate-200 bg-slate-50 p-3 text-sm leading-6 outline-none transition focus:border-teal-500 focus:bg-white"
-              onChange={(event) => setTranscript(event.target.value)}
-              value={transcript}
-            />
-            <button
-              className="mt-3 min-h-10 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-teal-300 hover:text-teal-800"
-              onClick={() => void handleSubmitTranscript()}
-              type="button"
-            >
-              Run transcript
-            </button>
           </Panel>
         </div>
 
@@ -534,28 +813,103 @@ export default function HostPage() {
               </ul>
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              {commerceCatalogue.map((sku) => (
-                <button
-                  className={`rounded-md border p-3 text-left text-sm transition ${
-                    sku.id === activeProduct.id
-                      ? "border-teal-300 bg-teal-50 text-teal-900"
-                      : "border-slate-200 bg-slate-50 text-slate-700 hover:border-teal-300 hover:bg-white"
-                  }`}
-                  key={sku.id}
-                  onClick={() => setCommandInput(`Switch to ${sku.name}.`)}
-                  type="button"
-                >
-                  <span className="block font-semibold">{sku.name}</span>
-                  <span className="mt-1 block text-xs">
-                    {sku.price} · {sku.stock} in stock
-                  </span>
-                </button>
-              ))}
+              {commerceCatalogue.map((sku) => {
+                const backendSku = backendState?.skus.find(
+                  (stateSku) => stateSku.id === sku.id,
+                );
+                return (
+                  <button
+                    className={`rounded-md border p-3 text-left text-sm transition ${
+                      sku.id === activeProduct.id
+                        ? "border-teal-300 bg-teal-50 text-teal-900"
+                        : "border-slate-200 bg-slate-50 text-slate-700 hover:border-teal-300 hover:bg-white"
+                    }`}
+                    key={sku.id}
+                    onClick={() => setCommandInput(`Switch to ${sku.name}.`)}
+                    type="button"
+                  >
+                    <span className="block font-semibold">{sku.name}</span>
+                    <span className="mt-1 block text-xs">
+                      {backendSku
+                        ? `${formatPrice(backendSku.price_cents)} · ${backendSku.stock} in stock`
+                        : `${sku.price} · ${sku.stock} in stock`}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
+            <form
+              className="mt-3 rounded-md border border-slate-200 bg-white p-3"
+              onSubmit={handleUpdateStock}
+            >
+              <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_7rem_auto] sm:items-end">
+                <label className="block text-sm font-semibold text-slate-900">
+                  Active SKU stock
+                  <span className="mt-1 block text-xs font-medium text-slate-500">
+                    {backendActiveSku?.name ?? activeProduct.name}
+                  </span>
+                </label>
+                <input
+                  className="min-h-10 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none transition focus:border-teal-500 focus:bg-white"
+                  min={0}
+                  onChange={(event) => setStockInput(event.target.value)}
+                  type="number"
+                  value={stockInput}
+                />
+                <button
+                  className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                  disabled={stockSaving}
+                  type="submit"
+                >
+                  {stockSaving ? "Saving" : "Update"}
+                </button>
+              </div>
+            </form>
           </Panel>
 
           <Panel title="AI Suggested Actions" eyebrow="LangGraph queue">
             <div className="space-y-3">
+              {pendingConfirmations.map((pending) => (
+                <div
+                  className="rounded-md border border-amber-300 bg-amber-50 p-3"
+                  key={pending.id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-900">
+                      Confirm {formatActionName(pending.action.type)}
+                    </p>
+                    <StatusPill tone="warning">Needs confirmation</StatusPill>
+                  </div>
+                  <p className="mt-2 text-sm leading-6 text-slate-700">
+                    {describePendingAction(pending, backendState)}
+                  </p>
+                  <p className="mt-2 rounded-md border border-amber-200 bg-white px-3 py-2 text-sm leading-6 text-slate-700">
+                    {pending.action.source_text}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      className="min-h-9 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+                      disabled={resolvingActionId === pending.id}
+                      onClick={() =>
+                        void handleResolvePendingAction(pending.id, "approve")
+                      }
+                      type="button"
+                    >
+                      Approve
+                    </button>
+                    <button
+                      className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-amber-300 hover:text-amber-800 disabled:text-slate-400"
+                      disabled={resolvingActionId === pending.id}
+                      onClick={() =>
+                        void handleResolvePendingAction(pending.id, "reject")
+                      }
+                      type="button"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              ))}
               {queueItems.map((item) => (
                 <div
                   className="rounded-md border border-amber-200 bg-amber-50 p-3"
