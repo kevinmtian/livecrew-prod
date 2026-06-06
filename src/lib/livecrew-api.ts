@@ -92,6 +92,13 @@ export type MediaSession = {
   viewer_candidates: RTCIceCandidateInit[];
 };
 
+export type RealtimeTranscriptionToken = {
+  value: string;
+  expires_at: number | null;
+  session_id: string | null;
+  model: string;
+};
+
 const DEFAULT_BACKEND_URL = "http://localhost:8000";
 
 export function getBackendUrl() {
@@ -134,6 +141,12 @@ export function sendHostTranscript(text: string) {
   return requestJson<WorkflowResponse>("/events/host-transcript", {
     method: "POST",
     body: JSON.stringify({ text, source: "speech_transcript" }),
+  });
+}
+
+export function createRealtimeTranscriptionToken() {
+  return requestJson<RealtimeTranscriptionToken>("/events/realtime-transcription-token", {
+    method: "POST",
   });
 }
 

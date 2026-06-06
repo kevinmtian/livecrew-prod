@@ -24,6 +24,7 @@ import {
   type WorkflowResponse,
   approvePendingAction,
   createMediaSession,
+  createRealtimeTranscriptionToken,
   fetchBackendState,
   fetchMediaSession,
   getBackendUrl,
@@ -58,49 +59,16 @@ type LiveTranscriptLine = {
   status: "final" | "error";
 };
 
-type BrowserSpeechRecognitionAlternative = {
-  transcript: string;
-};
-
-type BrowserSpeechRecognitionResult = {
-  isFinal: boolean;
-  0: BrowserSpeechRecognitionAlternative;
-};
-
-type BrowserSpeechRecognitionResultList = {
-  length: number;
-  [index: number]: BrowserSpeechRecognitionResult;
-};
-
-type BrowserSpeechRecognitionEvent = Event & {
-  resultIndex: number;
-  results: BrowserSpeechRecognitionResultList;
-};
-
-type BrowserSpeechRecognitionErrorEvent = Event & {
-  error: string;
-};
-
-type BrowserSpeechRecognition = {
-  continuous: boolean;
-  interimResults: boolean;
-  lang: string;
-  abort: () => void;
-  start: () => void;
-  stop: () => void;
-  onend: (() => void) | null;
-  onerror: ((event: BrowserSpeechRecognitionErrorEvent) => void) | null;
-  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
-  onstart: (() => void) | null;
-};
-
-type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
-
-type SpeechWindow = Window &
-  typeof globalThis & {
-    SpeechRecognition?: BrowserSpeechRecognitionConstructor;
-    webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+type RealtimeTranscriptionEvent = {
+  type: string;
+  delta?: string;
+  transcript?: string;
+  item_id?: string;
+  event_id?: string;
+  error?: {
+    message?: string;
   };
+};
 
 const initialLedger: LedgerEvent[] = [
   {
@@ -198,17 +166,18 @@ export default function HostPage() {
   >([]);
   const [interimTranscript, setInterimTranscript] = useState("");
   const [liveTranscriptStatus, setLiveTranscriptStatus] = useState<
-    "idle" | "listening" | "unsupported" | "error"
+    "idle" | "connecting" | "listening" | "unsupported" | "error"
   >("idle");
   const [liveTranscriptError, setLiveTranscriptError] = useState("");
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
+  const transcriptionPeerRef = useRef<RTCPeerConnection | null>(null);
+  const transcriptionDataChannelRef = useRef<RTCDataChannel | null>(null);
+  const completedTranscriptIdsRef = useRef<Set<string>>(new Set());
   const answerPollRef = useRef<number | null>(null);
   const viewerCandidateCountRef = useRef(0);
-  const speechRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
-  const shouldListenForSpeechRef = useRef(false);
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
   const backendActiveSku = backendState?.skus.find(
@@ -235,7 +204,7 @@ export default function HostPage() {
         window.clearInterval(answerPollRef.current);
       }
       unsubscribe();
-      stopLiveSpeechRecognition();
+      stopRealtimeTranscription();
       peerRef.current?.close();
       localStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
@@ -309,102 +278,126 @@ export default function HostPage() {
     }
   }
 
-  function stopLiveSpeechRecognition() {
-    shouldListenForSpeechRef.current = false;
-    const recognition = speechRecognitionRef.current;
-    speechRecognitionRef.current = null;
-    if (recognition) {
-      recognition.onend = null;
-      recognition.onerror = null;
-      recognition.onresult = null;
-      recognition.onstart = null;
-      recognition.abort();
-    }
+  function stopRealtimeTranscription() {
+    transcriptionDataChannelRef.current?.close();
+    transcriptionDataChannelRef.current = null;
+    transcriptionPeerRef.current?.close();
+    transcriptionPeerRef.current = null;
+    completedTranscriptIdsRef.current.clear();
     setInterimTranscript("");
     setLiveTranscriptStatus("idle");
   }
 
-  function startLiveSpeechRecognition() {
-    const SpeechRecognition =
-      (window as SpeechWindow).SpeechRecognition ??
-      (window as SpeechWindow).webkitSpeechRecognition;
-
-    if (!SpeechRecognition) {
-      setLiveTranscriptStatus("unsupported");
-      setLiveTranscriptError("Live transcript preview is unavailable in this browser.");
+  function handleRealtimeTranscriptionEvent(event: RealtimeTranscriptionEvent) {
+    if (event.type === "conversation.item.input_audio_transcription.delta") {
+      setInterimTranscript((currentText) => `${currentText}${event.delta ?? ""}`);
       return;
     }
 
-    stopLiveSpeechRecognition();
-    setLiveTranscriptError("");
-    shouldListenForSpeechRef.current = true;
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = navigator.language || "en-US";
-    recognition.onstart = () => setLiveTranscriptStatus("listening");
-    recognition.onresult = (event) => {
-      const finalSegments: string[] = [];
-      const interimSegments: string[] = [];
-
-      for (let index = event.resultIndex; index < event.results.length; index += 1) {
-        const result = event.results[index];
-        const transcriptText = result[0]?.transcript.trim();
-        if (!transcriptText) {
-          continue;
-        }
-
-        if (result.isFinal) {
-          finalSegments.push(transcriptText);
-        } else {
-          interimSegments.push(transcriptText);
-        }
-      }
-
-      setInterimTranscript(interimSegments.join(" "));
-      finalSegments.forEach((segment) => {
-        void processFinalSpeechTranscript(segment);
-      });
-    };
-    recognition.onerror = (event) => {
-      if (event.error === "no-speech") {
+    if (event.type === "conversation.item.input_audio_transcription.completed") {
+      const eventId = event.item_id ?? event.event_id ?? event.transcript ?? "";
+      if (eventId && completedTranscriptIdsRef.current.has(eventId)) {
         return;
       }
+      if (eventId) {
+        completedTranscriptIdsRef.current.add(eventId);
+      }
+      setInterimTranscript("");
+      if (event.transcript) {
+        void processFinalSpeechTranscript(event.transcript);
+      }
+      return;
+    }
 
+    if (event.type.includes("error")) {
       setLiveTranscriptStatus("error");
-      setLiveTranscriptError(`Live transcript error: ${event.error}`);
-      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-        shouldListenForSpeechRef.current = false;
-      }
-    };
-    recognition.onend = () => {
-      if (!shouldListenForSpeechRef.current) {
-        setLiveTranscriptStatus("idle");
-        return;
-      }
+      setLiveTranscriptError(
+        event.error?.message ?? "OpenAI Realtime transcription returned an error.",
+      );
+    }
+  }
 
-      window.setTimeout(() => {
-        if (
-          !shouldListenForSpeechRef.current ||
-          speechRecognitionRef.current !== recognition
-        ) {
-          return;
-        }
+  async function startRealtimeTranscription(stream: MediaStream) {
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack) {
+      setLiveTranscriptStatus("unsupported");
+      setLiveTranscriptError("No microphone audio track is available for transcription.");
+      return;
+    }
+
+    stopRealtimeTranscription();
+    setLiveTranscriptStatus("connecting");
+    setLiveTranscriptError("");
+
+    try {
+      const token = await createRealtimeTranscriptionToken();
+      const peer = new RTCPeerConnection();
+      const dataChannel = peer.createDataChannel("oai-events");
+      transcriptionPeerRef.current = peer;
+      transcriptionDataChannelRef.current = dataChannel;
+
+      dataChannel.addEventListener("open", () => {
+        setLiveTranscriptStatus("listening");
+        appendLedger({
+          id: "evt-openai-realtime-transcript",
+          label: "Realtime transcript ready",
+          detail: `OpenAI Realtime transcription connected with ${token.model}.`,
+          status: "watching",
+        });
+      });
+      dataChannel.addEventListener("message", (messageEvent) => {
         try {
-          recognition.start();
+          handleRealtimeTranscriptionEvent(JSON.parse(messageEvent.data));
         } catch {
           setLiveTranscriptStatus("error");
+          setLiveTranscriptError("Unable to read an OpenAI Realtime transcript event.");
         }
-      }, 250);
-    };
+      });
+      dataChannel.addEventListener("close", () => {
+        if (transcriptionDataChannelRef.current === dataChannel) {
+          setLiveTranscriptStatus("idle");
+        }
+      });
+      dataChannel.addEventListener("error", () => {
+        setLiveTranscriptStatus("error");
+        setLiveTranscriptError("OpenAI Realtime transcription data channel failed.");
+      });
 
-    speechRecognitionRef.current = recognition;
-    try {
-      recognition.start();
-    } catch {
+      peer.addTrack(audioTrack, stream);
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      if (!offer.sdp) {
+        throw new Error("Browser did not create an SDP offer for transcription.");
+      }
+
+      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          Authorization: `Bearer ${token.value}`,
+          "Content-Type": "application/sdp",
+        },
+      });
+      if (!sdpResponse.ok) {
+        const detail = await sdpResponse.text();
+        throw new Error(detail || "OpenAI Realtime SDP exchange failed.");
+      }
+
+      await peer.setRemoteDescription({
+        type: "answer",
+        sdp: await sdpResponse.text(),
+      });
+    } catch (error) {
+      transcriptionDataChannelRef.current?.close();
+      transcriptionDataChannelRef.current = null;
+      transcriptionPeerRef.current?.close();
+      transcriptionPeerRef.current = null;
       setLiveTranscriptStatus("error");
-      setLiveTranscriptError("Unable to start live transcript preview.");
+      setLiveTranscriptError(
+        error instanceof Error
+          ? error.message
+          : "Unable to start OpenAI Realtime transcription.",
+      );
     }
   }
 
@@ -585,7 +578,7 @@ export default function HostPage() {
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
-      startLiveSpeechRecognition();
+      void startRealtimeTranscription(stream);
 
       const session = await createMediaSession();
       setMediaSessionId(session.session_id);
@@ -624,7 +617,7 @@ export default function HostPage() {
         }
       }, 1000);
     } catch (error) {
-      stopLiveSpeechRecognition();
+      stopRealtimeTranscription();
       setStreamStatus("offline");
       setHostMediaSession(null, "offline");
       setMediaError(
@@ -638,7 +631,7 @@ export default function HostPage() {
       window.clearInterval(answerPollRef.current);
       answerPollRef.current = null;
     }
-    stopLiveSpeechRecognition();
+    stopRealtimeTranscription();
     peerRef.current?.close();
     peerRef.current = null;
     localStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -695,9 +688,13 @@ export default function HostPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_0.85fr]">
-        <div className="grid gap-4">
-          <Panel title="Live Stream" eyebrow="Camera and microphone">
+      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_0.85fr] xl:items-stretch">
+        <Panel
+          title="Live Stream"
+          eyebrow="Camera and microphone"
+          className="xl:col-start-1 xl:row-span-2 xl:flex xl:flex-col"
+          contentClassName="xl:flex xl:flex-1 xl:flex-col"
+        >
             <div className="overflow-hidden rounded-md bg-slate-950">
               <video
                 autoPlay
@@ -729,28 +726,43 @@ export default function HostPage() {
             ) : null}
             <div
               aria-live="polite"
-              className="mt-4 min-h-48 rounded-md border-4 border-red-400 bg-white p-3"
+              className="mt-4 overflow-hidden rounded-md border border-slate-200 bg-slate-50/80 xl:flex xl:flex-1 xl:flex-col"
             >
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-semibold text-slate-900">
-                  Live transcript
-                </p>
+              <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${
+                      liveTranscriptStatus === "listening"
+                        ? "bg-teal-500"
+                        : liveTranscriptStatus === "error" ||
+                            liveTranscriptStatus === "unsupported"
+                          ? "bg-amber-500"
+                          : "bg-slate-300"
+                    }`}
+                  />
+                  <p className="truncate text-sm font-semibold text-slate-900">
+                    Live transcript
+                  </p>
+                </div>
                 <StatusPill tone={liveTranscriptTone}>
                   {liveTranscriptStatus}
                 </StatusPill>
               </div>
-              <div className="mt-3 space-y-2 text-sm leading-6">
+              <div className="min-h-40 max-h-64 space-y-2 overflow-y-auto border-t border-slate-200 bg-white/80 p-3 text-sm leading-6 xl:min-h-0 xl:max-h-none xl:flex-1">
                 {interimTranscript ? (
-                  <p className="rounded-md border border-red-100 bg-red-50 px-3 py-2 text-slate-700">
+                  <p className="rounded-md border border-teal-100 bg-teal-50 px-3 py-2 text-slate-800 shadow-sm">
+                    <span className="mb-1 block text-xs font-semibold uppercase text-teal-700">
+                      Listening
+                    </span>
                     {interimTranscript}
                   </p>
                 ) : null}
                 {liveTranscriptLines.map((line) => (
                   <p
-                    className={`rounded-md border px-3 py-2 ${
+                    className={`rounded-md border px-3 py-2 shadow-sm ${
                       line.status === "error"
                         ? "border-amber-200 bg-amber-50 text-amber-800"
-                        : "border-slate-200 bg-slate-50 text-slate-800"
+                        : "border-slate-100 bg-white text-slate-800"
                     }`}
                     key={line.id}
                   >
@@ -758,18 +770,24 @@ export default function HostPage() {
                   </p>
                 ))}
                 {!interimTranscript && liveTranscriptLines.length === 0 ? (
-                  <p className="text-sm text-slate-400">Waiting for host speech.</p>
+                  <div className="flex min-h-28 items-center text-sm text-slate-500">
+                    <p>Waiting for host speech.</p>
+                  </div>
                 ) : null}
               </div>
               {liveTranscriptError ? (
-                <p className="mt-3 text-sm leading-6 text-amber-700">
+                <p className="border-t border-amber-100 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
                   {liveTranscriptError}
                 </p>
               ) : null}
             </div>
-          </Panel>
+        </Panel>
 
-          <Panel title="CoHost Text Command" eyebrow="Debug input">
+        <Panel
+          title="CoHost Text Command"
+          eyebrow="Debug input"
+          className="xl:col-start-1 xl:row-start-3"
+        >
             <form onSubmit={handleSubmitCommand}>
               <label className="sr-only" htmlFor="host-command">
                 Host command
@@ -787,11 +805,13 @@ export default function HostPage() {
                 Send to CoHost
               </button>
             </form>
-          </Panel>
-        </div>
+        </Panel>
 
-        <div className="grid gap-4">
-          <Panel title="Product Shelf" eyebrow="Backend active SKU">
+        <Panel
+          title="Product Shelf"
+          eyebrow="Backend active SKU"
+          className="xl:col-start-2 xl:row-start-1"
+        >
             <div className="rounded-lg border border-teal-200 bg-teal-50 p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -865,10 +885,14 @@ export default function HostPage() {
                 </button>
               </div>
             </form>
-          </Panel>
+        </Panel>
 
-          <Panel title="AI Suggested Actions" eyebrow="LangGraph queue">
-            <div className="space-y-3">
+        <Panel
+          title="AI Suggested Actions"
+          eyebrow="LangGraph queue"
+          className="xl:col-start-2 xl:row-start-2"
+        >
+            <div className="max-h-96 space-y-3 overflow-y-scroll pr-2">
               {pendingConfirmations.map((pending) => (
                 <div
                   className="rounded-md border border-amber-300 bg-amber-50 p-3"
@@ -931,9 +955,13 @@ export default function HostPage() {
                 </div>
               ))}
             </div>
-          </Panel>
+        </Panel>
 
-          <Panel title="Viewer Chat" eyebrow="Room messages">
+        <Panel
+          title="Viewer Chat"
+          eyebrow="Room messages"
+          className="xl:col-start-2 xl:row-start-3"
+        >
             <div className="space-y-3">
               {mockChat.map((chat) => (
                 <div
@@ -960,12 +988,15 @@ export default function HostPage() {
                 </div>
               ))}
             </div>
-          </Panel>
-        </div>
+        </Panel>
 
-        <div className="grid gap-4">
-          <Panel title="Agent Event Timeline" eyebrow="Ledger">
-            <div className="space-y-3">
+        <Panel
+          title="Agent Event Timeline"
+          eyebrow="Ledger"
+          className="xl:col-start-3 xl:row-span-2 xl:flex xl:flex-col"
+          contentClassName="xl:flex xl:flex-1 xl:flex-col"
+        >
+            <div className="max-h-[32rem] space-y-3 overflow-y-scroll pr-2 xl:min-h-0 xl:max-h-none xl:flex-1">
               {ledgerEvents.map((event) => {
                 const borderClass =
                   event.status === "blocked"
@@ -999,9 +1030,13 @@ export default function HostPage() {
                 );
               })}
             </div>
-          </Panel>
+        </Panel>
 
-          <Panel title="Host Reply" eyebrow="Viewer room">
+        <Panel
+          title="Host Reply"
+          eyebrow="Viewer room"
+          className="xl:col-start-3 xl:row-start-3"
+        >
             <form onSubmit={handleSendHostReply}>
               <input
                 className="min-h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-teal-500"
@@ -1016,8 +1051,7 @@ export default function HostPage() {
                 Send reply
               </button>
             </form>
-          </Panel>
-        </div>
+        </Panel>
       </div>
     </AppShell>
   );

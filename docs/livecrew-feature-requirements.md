@@ -217,8 +217,10 @@ Host speaks: "Let's show the tumbler now."
 Expected behavior:
 
 - The host cockpit should provide a microphone-driven transcription flow for the demo.
-- Host audio should use a realtime transcription flow for low-latency transcript display.
+- Host audio should use an OpenAI Realtime transcription flow for low-latency transcript display.
+- The backend should create short-lived OpenAI Realtime transcription credentials; the browser must not receive the long-lived `OPENAI_API_KEY`.
 - The host cockpit should show in-progress transcript text in the livestream panel while the host is speaking.
+- The livestream transcript area should use a quiet, integrated caption-console style rather than an alert-colored debug frame.
 - Only finalized transcript segments should trigger commerce actions.
 - Each finalized transcript segment should become a normalized `host_transcript` event.
 - Transcript events should include timestamp, source, text, and processing status.
@@ -228,7 +230,9 @@ Expected behavior:
 Acceptance criteria:
 
 - While the host is speaking during a live stream, transcript text appears in the livestream transcript area.
+- Transcript preview, finalized transcript lines, idle state, and transcription errors remain readable without visually competing with the live video.
 - With `OPENAI_API_KEY` configured, host speech can produce finalized transcript events for CoHostAgent processing.
+- The host cockpit can receive OpenAI Realtime transcription delta events for preview and completed transcription events for backend processing.
 - A finalized transcript segment can trigger CoHostAgent intent recognition.
 - If transcription fails, no commerce state is mutated.
 - The host can still use the typed CoHost debug input as a fallback for hackathon reliability.
@@ -621,7 +625,10 @@ The frontend should include:
 - Host camera and microphone permission controls.
 - Host local video preview with live/offline/muted states.
 - Host cockpit showing live transcript, active SKU, price, stock, flash sale, agent queue, and ledger.
+- Agent queue and ledger history should use bounded scroll areas so long demo runs do not stretch the cockpit layout.
+- On desktop, the camera/microphone panel, LangGraph queue group, and ledger panel should share a clean lower alignment, with the live transcript expanding to fill available space.
 - Viewer room styled as a mobile livestream commerce room.
+- The viewer route should present the mobile livestream frame directly, without the shared dashboard header above it.
 - Viewer livestream area occupying the top two-thirds of the mobile room.
 - Viewer chat area occupying the bottom one-third of the mobile room.
 - Viewer product overlay showing active SKU name, price, stock, and short grounded facts during the livestream.

@@ -13,13 +13,17 @@ from backend.commerce import approve_pending_action, reject_pending_action
 from backend.graphs.livecrew_graph import run_cohost_workflow
 from backend.media_signaling import media_store
 from backend.models import (
+    RealtimeTranscriptionTokenResponse,
     SessionCreateResponse,
     SignalPayload,
     TextEventRequest,
     TranscriptionResponse,
     WorkflowResponse,
 )
-from backend.openai_client import transcribe_audio_file
+from backend.openai_client import (
+    create_realtime_transcription_token,
+    transcribe_audio_file,
+)
 from backend.state import commerce_store
 
 
@@ -122,6 +126,17 @@ async def transcribe_audio(file: UploadFile = File(...)):
     finally:
         if "temp_path" in locals():
             temp_path.unlink(missing_ok=True)
+
+
+@app.post(
+    "/events/realtime-transcription-token",
+    response_model=RealtimeTranscriptionTokenResponse,
+)
+def realtime_transcription_token():
+    try:
+        return create_realtime_transcription_token()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/events/stream")

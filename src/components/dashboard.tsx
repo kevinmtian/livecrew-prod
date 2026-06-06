@@ -12,6 +12,8 @@ type PanelProps = {
   title: string;
   eyebrow?: string;
   children: ReactNode;
+  className?: string;
+  contentClassName?: string;
 };
 
 const navItems = [
@@ -55,16 +57,24 @@ export function AppShell({ eyebrow, title, description, children }: ShellProps) 
   );
 }
 
-export function Panel({ title, eyebrow, children }: PanelProps) {
+export function Panel({
+  title,
+  eyebrow,
+  children,
+  className = "",
+  contentClassName = "",
+}: PanelProps) {
   return (
-    <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <section
+      className={`rounded-lg border border-slate-200 bg-white p-4 shadow-sm ${className}`}
+    >
       {eyebrow ? (
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
           {eyebrow}
         </p>
       ) : null}
       <h2 className="text-base font-semibold text-slate-950">{title}</h2>
-      <div className="mt-4">{children}</div>
+      <div className={`mt-4 ${contentClassName}`}>{children}</div>
     </section>
   );
 }
