@@ -415,6 +415,7 @@ Rules:
 
 - Guardrails convert ambiguous, low-confidence, or risky actions into pending actions.
 - `noop` and non-actionable host speech must never enter the pending confirmation queue.
+- `noop` is an internal no-action result and must not be appended to the event ledger or displayed in the host ledger timeline.
 - Pending actions are stored in `CommerceState.pending_actions` and broadcast to the host cockpit.
 - Pending actions do not mutate SKU, price, promotion, order, stock, or KPI state.
 - Approving a pending action sends the original action back through guardrails with approval context, then into the commerce service.
@@ -933,6 +934,8 @@ class LedgerEntry(BaseModel):
 ```
 
 The ledger is the evidence layer for timeline UI, evaluation, and post-stream reporting.
+
+`noop` is intentionally excluded from ledger event types. It may appear in proposed agent output as an internal no-action result, but non-actionable speech should not create a ledger entry.
 
 For Producer reports, listed SKUs must be derived from `list_product` and `create_flash_sale` ledger events. `active_sku_changed` may be retained as a realtime event name, but report calculations should use the ledger event names above. Reset clears the current session ledger instead of adding a `state_reset` entry to it.
 

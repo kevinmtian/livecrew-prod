@@ -76,7 +76,8 @@ def commerce_node(graph_state: LiveCrewGraphState) -> LiveCrewGraphState:
         applied, ledger_entry = apply_action(action, guardrail, state)
         if applied:
             applied_actions.append(applied)
-        ledger_entries.append(ledger_entry)
+        if ledger_entry:
+            ledger_entries.append(ledger_entry)
 
     state.ledger = [*ledger_entries, *state.ledger][:200]
     graph_state["commerce_state"] = commerce_store.replace(state)

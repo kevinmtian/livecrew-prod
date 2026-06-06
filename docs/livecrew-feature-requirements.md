@@ -155,6 +155,7 @@ Requirements:
 
 - Deterministic evaluation cases should exist for agent routing, SKU grounding, guardrail decisions, and commerce execution.
 - Ledger entries should explain why an action was applied, blocked, or escalated.
+- Internal `noop` decisions should not be shown in the host ledger because they are non-events, not evidence of an applied, blocked, or escalated commerce action.
 - Agent outputs should include confidence, reason, and evidence.
 - The host UI should expose enough timeline detail to debug a wrong action during the demo.
 
@@ -285,7 +286,7 @@ Acceptance criteria:
 
 - On a Mac with browser camera and microphone permission granted, `/host` can capture local media and `/viewer` can play the live host stream.
 - The host can stop the stream and the viewer room reflects that the stream is offline.
-- Media permission failure does not break product shelf, chat, agent queue, or commerce state.
+- Media permission failure does not break product shelf, chat, CoHost Agent queue, or commerce state.
 - The implementation uses browser-native media capture and a lightweight realtime transport suitable for the hackathon demo.
 
 ### FR-0C: Mobile Viewer Room Layout
@@ -519,7 +520,8 @@ Acceptance criteria:
 - Product fact questions produce `suggest_reply` actions with grounded evidence and structured LLM output.
 - Unsupported discount and health-related requests are escalated as pending host-review drafts and do not auto-send.
 - Irrelevant or ungrounded messages produce no suggested reply.
-- Host confirmations are visible in the agent queue and are stored in backend state, not only in local UI state.
+- Ambiguous questions ask for clarification or host confirmation.
+- Host confirmations are visible in the CoHost Agent queue and are stored in backend state, not only in local UI state.
 - Pending host confirmations in the host cockpit should provide approve and reject controls that resolve the backend pending action.
 - Replies reference current backend price and promotion state when relevant.
 - The event ledger records suggested replies and blocked claims.
@@ -626,12 +628,15 @@ The expected result is that new functionality plugs into the framework instead o
 The frontend should include:
 
 - Host microphone/transcription controls for the OpenAI realtime transcription flow.
-- Host text command input for CoHostAgent debugging.
+- Host text command input for CoHost Agent debugging.
 - Host camera and microphone permission controls.
 - Host local video preview with live/offline/muted states.
-- Host cockpit showing live transcript, active SKU, price, stock, flash sale, agent queue, and ledger.
-- Agent queue and ledger history should use bounded scroll areas so long demo runs do not stretch the cockpit layout.
-- On desktop, the camera/microphone panel, LangGraph queue group, and ledger panel should share a clean lower alignment, with the live transcript expanding to fill available space.
+- Host cockpit showing live transcript, active SKU, price, stock, flash sale, CoHost Agent Suggested Actions queue, and a CoHost Agent Event Timeline ledger panel.
+- Dashboard panels should show only the main panel title, without smaller eyebrow labels above it.
+- CoHost Agent queue and ledger history should use matching bounded scroll areas so long demo runs do not stretch the cockpit layout.
+- On desktop, Monitor Agent and CoHost Agent Event Timeline should sit side by side with matching width and height.
+- When the timeline is moved beside Monitor Agent, the host cockpit should use a wider desktop canvas instead of shrinking the existing module widths.
+- On desktop, the camera/microphone panel, CoHost Agent queue group, and ledger panel should share a clean lower alignment, with the live transcript expanding to fill available space.
 - Viewer room styled as a mobile livestream commerce room.
 - The viewer route should present the mobile livestream frame directly, without the shared dashboard header above it.
 - Viewer livestream area occupying the top two-thirds of the mobile room.

@@ -76,10 +76,14 @@ const initialLedger: LedgerEvent[] = [
   {
     id: "evt-initial-001",
     label: "Backend expected",
-    detail: "Start the Python backend on port 8000 before running live agent flows.",
+    detail: "Start the Python backend on port 8000 before running CoHost Agent flows.",
     status: "watching",
   },
 ];
+
+const boundedScrollAreaClass =
+  "max-h-96 space-y-3 overflow-y-scroll pr-2 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300";
+const fixedLedgerScrollAreaClass = `h-96 ${boundedScrollAreaClass}`;
 
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
@@ -95,16 +99,18 @@ function getActiveStockInputValue(state: BackendState) {
 }
 
 function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
-  return response.ledger_entries.map((entry) => ({
-    id: entry.id,
-    label: entry.type.replaceAll("_", " "),
-    detail: entry.detail,
-    status: entry.type.includes("block")
-      ? "blocked"
-      : entry.type === "host_confirmation_requested"
-        ? "pending"
-        : "complete",
-  }));
+  return response.ledger_entries
+    .filter((entry) => entry.type !== "noop")
+    .map((entry) => ({
+      id: entry.id,
+      label: entry.type.replaceAll("_", " "),
+      detail: entry.detail,
+      status: entry.type.includes("block")
+        ? "blocked"
+        : entry.type === "host_confirmation_requested"
+          ? "pending"
+          : "complete",
+    }));
 }
 
 function formatActionName(type: string) {
@@ -152,8 +158,8 @@ export default function HostPage() {
   const [queueItems, setQueueItems] = useState<QueueItem[]>([
     {
       id: "queue-initial",
-      title: "Waiting for CoHostAgent",
-      detail: "Submit a typed command or speak live to call the Python LangGraph backend.",
+      title: "Waiting for CoHost Agent",
+      detail: "Submit a typed command or speak live to call the Python CoHost Agent workflow.",
       status: "Review",
     },
   ]);
@@ -447,7 +453,7 @@ export default function HostPage() {
           detail:
             action.reply_text ??
             action.reason ??
-            "Agent produced a structured action.",
+            "CoHost Agent produced a structured action.",
           status: response.guardrail_results.some(
             (result) =>
               result.action_type === action.type &&
@@ -641,8 +647,8 @@ export default function HostPage() {
     setQueueItems([
       {
         id: "queue-initial",
-        title: "Waiting for CoHostAgent",
-        detail: "Submit a typed command or speak live to call the Python LangGraph backend.",
+        title: "Waiting for CoHost Agent",
+        detail: "Submit a typed command or speak live to call the Python CoHost Agent workflow.",
         status: "Review",
       },
     ]);
@@ -766,6 +772,7 @@ export default function HostPage() {
       eyebrow="Host"
       title="Operator cockpit"
       description={`Python backend: ${getBackendUrl()}`}
+      contentMaxWidthClass="max-w-[104rem]"
     >
       <div className="mb-4 flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:flex-row md:items-center md:justify-between">
         <div className="flex flex-wrap gap-2">
@@ -795,7 +802,7 @@ export default function HostPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_0.85fr] xl:items-stretch">
+      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_0.85fr_0.85fr] xl:items-stretch">
         <Panel
           title="Live Stream"
           eyebrow="Camera and microphone"
@@ -891,7 +898,7 @@ export default function HostPage() {
         </Panel>
 
         <Panel
-          title="CoHost Text Command"
+          title="CoHost Agent Text Command"
           eyebrow="Debug input"
           className="xl:col-start-1 xl:row-start-3"
         >
@@ -909,7 +916,7 @@ export default function HostPage() {
                 className="mt-3 min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
                 type="submit"
               >
-                Send to CoHost
+                Send to CoHost Agent
               </button>
             </form>
         </Panel>
@@ -995,11 +1002,11 @@ export default function HostPage() {
         </Panel>
 
         <Panel
-          title="AI Suggested Actions"
-          eyebrow="LangGraph queue"
+          title="CoHost Agent Suggested Actions"
+          eyebrow="CoHost Agent queue"
           className="xl:col-start-2 xl:row-start-2"
         >
-            <div className="max-h-96 space-y-3 overflow-y-scroll pr-2">
+            <div className={boundedScrollAreaClass}>
               {pendingConfirmations.map((pending) => (
                 <div
                   className="rounded-md border border-amber-300 bg-amber-50 p-3"
@@ -1097,10 +1104,15 @@ export default function HostPage() {
             </div>
         </Panel>
 
-        <div className="grid gap-4 xl:col-start-3 xl:row-span-2 xl:min-h-0 xl:grid-rows-[auto_minmax(0,1fr)]">
-          <Panel title="Monitor Agent" eyebrow="Scene judgment">
+        <div className="grid gap-4 xl:col-start-3 xl:col-span-2 xl:row-span-2 xl:min-h-0 xl:grid-cols-2">
+          <Panel
+            title="Monitor Agent"
+            eyebrow="Scene judgment"
+            className="xl:min-h-0 xl:flex xl:flex-col"
+            contentClassName="xl:flex xl:flex-1"
+          >
             {roomState.monitorSignal ? (
-              <div className="rounded-md border border-rose-100 bg-rose-50 p-4">
+              <div className="w-full rounded-md border border-rose-100 bg-rose-50 p-4">
                 <div className="mb-4 grid grid-cols-2 gap-2">
                   {[
                     ["在线人数", roomState.monitorSignal.signals.online_viewers],
@@ -1150,19 +1162,19 @@ export default function HostPage() {
                 </p>
               </div>
             ) : (
-              <div className="rounded-md border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
+              <div className="flex w-full items-center rounded-md border border-slate-200 bg-slate-50 p-4 text-sm leading-6 text-slate-600">
                 Open Monitor and click a scenario to push judgment and script here.
               </div>
             )}
           </Panel>
 
           <Panel
-            title="Agent Event Timeline"
+            title="CoHost Agent Event Timeline"
             eyebrow="Ledger"
             className="xl:min-h-0 xl:flex xl:flex-col"
             contentClassName="xl:flex xl:flex-1 xl:flex-col"
           >
-            <div className="max-h-[32rem] space-y-3 overflow-y-scroll pr-2 xl:min-h-0 xl:max-h-none xl:flex-1">
+            <div className={fixedLedgerScrollAreaClass}>
               {ledgerEvents.map((event) => {
                 const borderClass =
                   event.status === "blocked"
@@ -1202,7 +1214,7 @@ export default function HostPage() {
         <Panel
           title="Host Reply"
           eyebrow="Viewer room"
-          className="xl:col-start-3 xl:row-start-3"
+          className="xl:col-start-3 xl:col-span-2 xl:row-start-3"
         >
             <div className="space-y-3">
               {conciergeEscalations.map((pending) => {

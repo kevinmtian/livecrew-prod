@@ -6,6 +6,7 @@ type ShellProps = {
   title: string;
   description: string;
   children: ReactNode;
+  contentMaxWidthClass?: string;
 };
 
 type PanelProps = {
@@ -24,7 +25,13 @@ const navItems = [
   { href: "/agent_evaluation", label: "Agent Evaluation" },
 ];
 
-export function AppShell({ eyebrow, title, description, children }: ShellProps) {
+export function AppShell({
+  eyebrow,
+  title,
+  description,
+  children,
+  contentMaxWidthClass = "max-w-7xl",
+}: ShellProps) {
   return (
     <main className="min-h-screen bg-[#f7f8fa] text-slate-950">
       <header className="border-b border-slate-200 bg-white">
@@ -53,14 +60,15 @@ export function AppShell({ eyebrow, title, description, children }: ShellProps) 
           </nav>
         </div>
       </header>
-      <section className="mx-auto w-full max-w-7xl px-5 py-6">{children}</section>
+      <section className={`mx-auto w-full ${contentMaxWidthClass} px-5 py-6`}>
+        {children}
+      </section>
     </main>
   );
 }
 
 export function Panel({
   title,
-  eyebrow,
   children,
   className = "",
   contentClassName = "",
@@ -69,11 +77,6 @@ export function Panel({
     <section
       className={`rounded-lg border border-slate-200 bg-white p-4 shadow-sm ${className}`}
     >
-      {eyebrow ? (
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          {eyebrow}
-        </p>
-      ) : null}
       <h2 className="text-base font-semibold text-slate-950">{title}</h2>
       <div className={`mt-4 ${contentClassName}`}>{children}</div>
     </section>

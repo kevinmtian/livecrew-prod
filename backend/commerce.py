@@ -45,7 +45,7 @@ def apply_action(
     action: ProposedAction,
     guardrail: GuardrailResult,
     state: CommerceState,
-) -> tuple[AppliedAction | None, LedgerEntry]:
+) -> tuple[AppliedAction | None, LedgerEntry | None]:
     if guardrail.status == "needs_host_confirmation":
         pending = PendingAction(
             action=action,
@@ -220,12 +220,7 @@ def apply_action(
             LedgerEntry(type="flash_sale_cancelled", detail=detail, source_text=action.source_text),
         )
 
-    return None, LedgerEntry(
-        type="noop",
-        detail=action.reason or "No action applied.",
-        source_text=action.source_text,
-        payload={"action": action.model_dump(mode="json")},
-    )
+    return None, None
 
 
 def _find_pending_action(
@@ -266,7 +261,10 @@ def approve_pending_action(
     )
 
     applied_actions = [applied] if applied else []
-    return applied_actions, [guardrail], [resolution_ledger, action_ledger]
+    ledger_entries = [resolution_ledger]
+    if action_ledger:
+        ledger_entries.append(action_ledger)
+    return applied_actions, [guardrail], ledger_entries
 
 
 def reject_pending_action(
