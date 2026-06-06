@@ -19,9 +19,14 @@ FLASH_RE = re.compile(
     r"first\s+(\d+)\s+(?:buyers|orders|people)?.*?(?:at|for)\s+\$?(\d+(?:\.\d{1,2})?).*?(\d+)\s+minutes?",
     re.IGNORECASE,
 )
+STOCK_RE = re.compile(
+    r"(?:stock|inventory|units)\D{0,24}(\d+)",
+    re.IGNORECASE,
+)
 SUPPORTED_COHOST_ACTIONS = {
     "set_active_sku",
     "update_price",
+    "update_stock",
     "restore_price",
     "create_flash_sale",
     "cancel_flash_sale",
@@ -33,6 +38,7 @@ class ExtractedHostAction(BaseModel):
     type: Literal[
         "set_active_sku",
         "update_price",
+        "update_stock",
         "restore_price",
         "create_flash_sale",
         "cancel_flash_sale",
@@ -40,6 +46,7 @@ class ExtractedHostAction(BaseModel):
     ]
     sku_id: str | None = None
     price_cents: int | None = None
+    stock: int | None = None
     sale_price_cents: int | None = None
     duration_seconds: int | None = None
     stock_limit: int | None = None
@@ -83,11 +90,12 @@ def _extract_actions_with_openai(
         "English, Chinese, and mixed-language phrasing. Return actions in the "
         "order the host intends them to happen.\n\n"
         "Supported action types: set_active_sku, update_price, restore_price, "
-        "create_flash_sale, cancel_flash_sale, noop.\n"
+        "update_stock, create_flash_sale, cancel_flash_sale, noop.\n"
         "Use only SKU ids from the provided catalogue. If a flash sale or price "
-        "action has no explicit product, use the current active SKU. Convert "
+        "or stock action has no explicit product, use the current active SKU. Convert "
         "money expressions to integer cents, duration expressions to seconds, "
-        "and quantity limits to integer stock_limit. For create_flash_sale, "
+        "stock updates to integer stock, and quantity limits to integer stock_limit. "
+        "For create_flash_sale, "
         "sale_price_cents must come from the host's promotional price expression, "
         "not the catalogue or current SKU price. Do not invent missing price, "
         "duration, quantity, SKU, discounts, delivery promises, or unsupported claims. "
@@ -143,13 +151,13 @@ def _to_proposed_actions(
                     confidence=min(extracted.confidence, 0.4),
                     reason=f"OpenAI proposed unknown SKU id: {sku_id}.",
                     evidence=extracted.evidence,
-                    requires_host_confirmation=True,
                 )
             )
             continue
 
         if action_type in {
             "update_price",
+            "update_stock",
             "restore_price",
             "create_flash_sale",
             "cancel_flash_sale",
@@ -171,6 +179,7 @@ def _build_proposed_action(
     input_source: InputSource,
 ) -> ProposedAction:
     price_cents = extracted.price_cents if action_type == "update_price" else None
+    stock = extracted.stock if action_type == "update_stock" else None
     sale_price_cents = extracted.sale_price_cents if action_type == "create_flash_sale" else None
     duration_seconds = extracted.duration_seconds if action_type == "create_flash_sale" else None
     stock_limit = extracted.stock_limit if action_type == "create_flash_sale" else None
@@ -179,6 +188,7 @@ def _build_proposed_action(
         type=action_type,
         sku_id=sku_id,
         price_cents=price_cents,
+        stock=stock,
         sale_price_cents=sale_price_cents,
         duration_seconds=duration_seconds,
         stock_limit=stock_limit,
@@ -204,7 +214,8 @@ def _with_display_sku_action(
         (
             action.sku_id
             for action in actions
-            if action.type in {"update_price", "restore_price", "create_flash_sale"}
+            if action.type
+            in {"update_price", "update_stock", "restore_price", "create_flash_sale"}
             and action.sku_id
             and action.sku_id != state.active_sku_id
         ),
@@ -265,6 +276,7 @@ def _analyze_host_text_deterministic(
         )
 
     flash_match = FLASH_RE.search(text)
+    stock_match = STOCK_RE.search(text)
     if contextual_sku and flash_match:
         stock_limit, price_text, minutes_text = flash_match.groups()
         actions.append(
@@ -294,8 +306,28 @@ def _analyze_host_text_deterministic(
             )
         )
 
+    if contextual_sku and stock_match and not flash_match:
+        actions.append(
+            ProposedAction(
+                type="update_stock",
+                sku_id=contextual_sku.id,
+                stock=int(stock_match.group(1)),
+                source_text=text,
+                input_source=input_source,
+                confidence=0.84,
+                reason="Host requested a live stock update.",
+                evidence=[stock_match.group(0)],
+            )
+        )
+
     price_match = PRICE_RE.search(text)
-    if contextual_sku and price_match and not flash_match and "original price" not in lower_text:
+    if (
+        contextual_sku
+        and price_match
+        and not flash_match
+        and not stock_match
+        and "original price" not in lower_text
+    ):
         actions.append(
             ProposedAction(
                 type="update_price",
@@ -318,7 +350,6 @@ def _analyze_host_text_deterministic(
                 confidence=0.35,
                 reason="No supported host commerce action was detected.",
                 evidence=[],
-                requires_host_confirmation=True,
             )
         )
 

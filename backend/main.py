@@ -9,7 +9,8 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from backend.commerce import apply_action
+from backend.agents.monitor import analyze_monitor_signals
+from backend.commerce import apply_action, approve_pending_action, reject_pending_action
 from backend.graphs.livecrew_graph import run_cohost_workflow, run_concierge_workflow
 from backend.media_signaling import media_store
 from backend.models import (
@@ -17,6 +18,8 @@ from backend.models import (
     AppliedAction,
     LedgerEntry,
     PendingReplyRequest,
+    MonitorResponse,
+    MonitorSignalRequest,
     SessionCreateResponse,
     SignalPayload,
     TextEventRequest,
@@ -35,7 +38,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
     ],
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=True,
@@ -59,6 +64,55 @@ def reset_state():
     return commerce_store.reset()
 
 
+@app.post("/actions/{pending_action_id}/approve", response_model=WorkflowResponse)
+def approve_action(pending_action_id: str):
+    state = commerce_store.get()
+    result = approve_pending_action(pending_action_id, state)
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending action not found.")
+
+    applied_actions, guardrail_results, ledger_entries = result
+    state.ledger = [*ledger_entries, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    suggested_reply = next(
+        (
+            action.detail
+            for action in applied_actions
+            if action.type == "suggest_reply"
+        ),
+        None,
+    )
+    return WorkflowResponse(
+        proposed_actions=[],
+        guardrail_results=guardrail_results,
+        pending_actions=updated_state.pending_actions,
+        applied_actions=applied_actions,
+        ledger_entries=ledger_entries,
+        suggested_reply=suggested_reply,
+        state=updated_state,
+    )
+
+
+@app.post("/actions/{pending_action_id}/reject", response_model=WorkflowResponse)
+def reject_action(pending_action_id: str):
+    state = commerce_store.get()
+    result = reject_pending_action(pending_action_id, state)
+    if not result:
+        raise HTTPException(status_code=404, detail="Pending action not found.")
+
+    guardrail_results, ledger_entries = result
+    state.ledger = [*ledger_entries, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return WorkflowResponse(
+        proposed_actions=[],
+        guardrail_results=guardrail_results,
+        pending_actions=updated_state.pending_actions,
+        applied_actions=[],
+        ledger_entries=ledger_entries,
+        state=updated_state,
+    )
+
+
 @app.post("/events/host-command")
 def host_command(request: TextEventRequest):
     if not request.text.strip():
@@ -80,10 +134,9 @@ def viewer_message(request: ViewerMessageRequest):
     return run_concierge_workflow(request.text.strip(), request.viewer.strip() or "viewer")
 
 
-def _resolve_pending_reply(
+def _send_edited_pending_reply(
     pending_action_id: str,
     request: PendingReplyRequest,
-    reject: bool = False,
 ) -> WorkflowResponse:
     state = commerce_store.get()
     pending = next(
@@ -95,62 +148,31 @@ def _resolve_pending_reply(
     if pending.action.type != "suggest_reply":
         raise HTTPException(status_code=400, detail="Pending action is not a reply draft.")
 
-    state.pending_actions = [
-        action for action in state.pending_actions if action.id != pending_action_id
-    ]
-
-    if reject:
-        ledger_entry = LedgerEntry(
-            type="host_confirmation_resolved",
-            detail="Host discarded concierge reply draft without sending a viewer reply.",
-            source_text=pending.action.source_text,
-            payload={
-                "pending_action_id": pending_action_id,
-                "status": "rejected",
-                "viewer": pending.action.viewer,
-            },
-        )
-        state.ledger = [ledger_entry, *state.ledger][:200]
-        updated_state = commerce_store.replace(state)
-        decision = AgentDecision(
-            agent="ConciergeAgent",
-            summary="Host discarded concierge reply draft.",
-            confidence=1,
-            source_text=pending.action.source_text,
-        )
-        return WorkflowResponse(
-            agent_decisions=[decision],
-            proposed_actions=[],
-            guardrail_results=[],
-            pending_actions=updated_state.pending_actions,
-            applied_actions=[],
-            ledger_entries=[ledger_entry],
-            suggested_reply=None,
-            state=updated_state,
-        )
-
     reply_text = (request.reply_text or pending.action.reply_text or "").strip()
     if not reply_text:
         raise HTTPException(status_code=400, detail="Reply text is required.")
 
+    state.pending_actions = [
+        action for action in state.pending_actions if action.id != pending_action_id
+    ]
     action = pending.action.model_copy(
         update={
             "reply_text": reply_text,
             "requires_host_confirmation": False,
-            "reason": "Host approved concierge reply draft.",
+            "reason": "Host edited concierge reply draft.",
         }
     )
     guardrail = validate_action(action, state)
     applied, ledger_entry = apply_action(action, guardrail, state)
     resolution_entry = LedgerEntry(
         type="host_confirmation_resolved",
-        detail="Host approved concierge reply draft."
+        detail="Host sent edited concierge reply draft."
         if guardrail.allowed
         else "Host reply draft failed guardrail validation.",
         source_text=action.source_text,
         payload={
             "pending_action_id": pending_action_id,
-            "status": "approved" if guardrail.allowed else "blocked",
+            "status": "edited" if guardrail.allowed else "blocked",
             "viewer": action.viewer,
         },
     )
@@ -175,19 +197,14 @@ def _resolve_pending_reply(
     )
 
 
-@app.post("/actions/{pending_action_id}/approve")
-def approve_pending_reply(pending_action_id: str):
-    return _resolve_pending_reply(pending_action_id, PendingReplyRequest())
-
-
 @app.post("/actions/{pending_action_id}/reply")
 def reply_to_pending_action(pending_action_id: str, request: PendingReplyRequest):
-    return _resolve_pending_reply(pending_action_id, request)
+    return _send_edited_pending_reply(pending_action_id, request)
 
 
-@app.post("/actions/{pending_action_id}/reject")
-def reject_pending_reply(pending_action_id: str):
-    return _resolve_pending_reply(pending_action_id, PendingReplyRequest(), reject=True)
+@app.post("/events/monitor-signal", response_model=MonitorResponse)
+def monitor_signal(request: MonitorSignalRequest):
+    return analyze_monitor_signals(request)
 
 
 @app.post("/events/transcribe-audio", response_model=TranscriptionResponse)

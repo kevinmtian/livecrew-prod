@@ -35,13 +35,17 @@ def _reply_contains_unsupported_claim(reply_text: str) -> bool:
     return False
 
 
-def validate_action(action: ProposedAction, state: CommerceState) -> GuardrailResult:
+def validate_action(
+    action: ProposedAction,
+    state: CommerceState,
+    host_approved: bool = False,
+) -> GuardrailResult:
     if action.type == "noop":
         return GuardrailResult(
             action_type=action.type,
-            allowed=False,
-            status="needs_host_confirmation",
-            reason=action.reason or "No supported action detected.",
+            allowed=True,
+            status="allowed",
+            reason=action.reason or "No commerce action required.",
         )
 
     if action.sku_id and not get_sku_by_id(action.sku_id, state.skus):
@@ -103,17 +107,18 @@ def validate_action(action: ProposedAction, state: CommerceState) -> GuardrailRe
     if action.type in {
         "set_active_sku",
         "update_price",
+        "update_stock",
         "restore_price",
         "create_flash_sale",
     } and not action.sku_id:
         return GuardrailResult(
             action_type=action.type,
             allowed=False,
-            status="needs_host_confirmation",
+            status="blocked" if host_approved else "needs_host_confirmation",
             reason="Action needs a grounded SKU before it can be applied.",
         )
 
-    if action.requires_host_confirmation:
+    if action.requires_host_confirmation and not host_approved:
         return GuardrailResult(
             action_type=action.type,
             allowed=False,
@@ -129,12 +134,21 @@ def validate_action(action: ProposedAction, state: CommerceState) -> GuardrailRe
                 status="blocked",
                 reason="Price update needs a positive price.",
             )
-        if action.price_cents < 500:
+        if action.price_cents < 500 and not host_approved:
             return GuardrailResult(
                 action_type=action.type,
                 allowed=False,
                 status="needs_host_confirmation",
                 reason="Very low prices require host confirmation.",
+            )
+
+    if action.type == "update_stock":
+        if action.stock is None or action.stock < 0:
+            return GuardrailResult(
+                action_type=action.type,
+                allowed=False,
+                status="blocked",
+                reason="Stock update needs a non-negative stock quantity.",
             )
 
     if action.type == "create_flash_sale":
@@ -160,14 +174,18 @@ def validate_action(action: ProposedAction, state: CommerceState) -> GuardrailRe
                 status="blocked",
                 reason="Flash sale quantity cannot exceed current SKU stock.",
             )
-        if action.duration_seconds < 30 or action.duration_seconds > 1800:
+        if (
+            action.duration_seconds < 30 or action.duration_seconds > 1800
+        ) and not host_approved:
             return GuardrailResult(
                 action_type=action.type,
                 allowed=False,
                 status="needs_host_confirmation",
                 reason="Flash sale duration must be between 30 seconds and 30 minutes.",
             )
-        if action.sale_price_cents < 500 or action.stock_limit > 50:
+        if (
+            action.sale_price_cents < 500 or action.stock_limit > 50
+        ) and not host_approved:
             return GuardrailResult(
                 action_type=action.type,
                 allowed=False,

@@ -8,6 +8,41 @@ export type BackendSku = {
   base_price_cents: number | null;
 };
 
+export type ProposedAction = {
+  type: string;
+  sku_id: string | null;
+  quantity: number | null;
+  source_text: string;
+  input_source: string;
+  price_cents: number | null;
+  stock: number | null;
+  sale_price_cents: number | null;
+  duration_seconds: number | null;
+  stock_limit: number | null;
+  reply_text: string | null;
+  viewer: string | null;
+  confidence: number;
+  reason: string | null;
+  evidence: string[];
+  requires_host_confirmation: boolean;
+};
+
+export type GuardrailResult = {
+  action_type: string;
+  allowed: boolean;
+  status: string;
+  reason: string;
+};
+
+export type PendingAction = {
+  id: string;
+  action: ProposedAction;
+  guardrail_result: GuardrailResult;
+  requested_by: string;
+  status: "pending" | "approved" | "rejected" | "overridden";
+  created_at: string;
+};
+
 export type BackendState = {
   active_sku_id: string | null;
   skus: BackendSku[];
@@ -27,19 +62,7 @@ export type BackendState = {
     viewer: string;
     created_at: string;
   }>;
-  pending_actions: Array<{
-    id: string;
-    action: BackendProposedAction;
-    guardrail_result: {
-      action_type: string;
-      allowed: boolean;
-      status: string;
-      reason: string;
-    };
-    requested_by: string;
-    status: string;
-    created_at: string;
-  }>;
+  pending_actions: PendingAction[];
   ledger: Array<{
     id: string;
     type: string;
@@ -51,19 +74,6 @@ export type BackendState = {
   updated_at: string;
 };
 
-export type BackendProposedAction = {
-  type: string;
-  sku_id: string | null;
-  quantity: number | null;
-  source_text: string;
-  input_source: string;
-  reply_text: string | null;
-  viewer: string | null;
-  confidence: number;
-  reason: string | null;
-  evidence: string[];
-};
-
 export type WorkflowResponse = {
   agent_decisions: Array<{
     id: string;
@@ -73,13 +83,9 @@ export type WorkflowResponse = {
     source_text: string;
     created_at: string;
   }>;
-  proposed_actions: BackendProposedAction[];
-  guardrail_results: Array<{
-    action_type: string;
-    allowed: boolean;
-    status: string;
-    reason: string;
-  }>;
+  proposed_actions: ProposedAction[];
+  guardrail_results: GuardrailResult[];
+  pending_actions: PendingAction[];
   applied_actions: Array<{
     type: string;
     sku_id: string | null;
@@ -88,6 +94,34 @@ export type WorkflowResponse = {
   ledger_entries: BackendState["ledger"];
   suggested_reply: string | null;
   state: BackendState;
+};
+
+export type MonitorSignalPayload = {
+  online_viewers: number;
+  online_viewers_delta: number;
+  gpm_cents: number;
+  gpm_delta: number;
+  conversion_rate: number;
+  conversion_rate_delta: number;
+  comment_sentiment: number;
+  interaction_rate: number;
+};
+
+export type MonitorResponse = {
+  agent: "MonitorAgent";
+  scenario: {
+    id: "hesitation" | "spike_push" | "warm_retention" | "cold_warning" | "steady";
+    label: string;
+    reason: string;
+    urgency: "low" | "medium" | "high";
+  };
+  hook: {
+    id: "suspense" | "order_push" | "benefit" | "interaction";
+    label: string;
+    script: string;
+  };
+  signals: Record<string, string>;
+  created_at: string;
 };
 
 export type MediaSession = {
@@ -151,13 +185,6 @@ export function sendViewerMessage(text: string, viewer = "viewer") {
   });
 }
 
-export function approvePendingReply(pendingActionId: string) {
-  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/approve`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-}
-
 export function sendEditedPendingReply(pendingActionId: string, replyText: string) {
   return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reply`, {
     method: "POST",
@@ -165,10 +192,16 @@ export function sendEditedPendingReply(pendingActionId: string, replyText: strin
   });
 }
 
-export function rejectPendingReply(pendingActionId: string) {
-  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reject`, {
+export function approvePendingAction(pendingActionId: string) {
+  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/approve`, {
     method: "POST",
-    body: JSON.stringify({}),
+  });
+}
+
+export function sendMonitorSignal(payload: MonitorSignalPayload) {
+  return requestJson<MonitorResponse>("/events/monitor-signal", {
+    method: "POST",
+    body: JSON.stringify(payload),
   });
 }
 
@@ -187,6 +220,12 @@ export async function transcribeAudio(blob: Blob) {
   }
 
   return response.json() as Promise<{ text: string; source: string }>;
+}
+
+export function rejectPendingAction(pendingActionId: string) {
+  return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reject`, {
+    method: "POST",
+  });
 }
 
 export function createMediaSession() {

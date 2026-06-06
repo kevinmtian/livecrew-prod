@@ -18,6 +18,7 @@ const navItems = [
   { href: "/", label: "Home" },
   { href: "/host", label: "Host" },
   { href: "/viewer", label: "Viewer" },
+  { href: "/monitor", label: "Monitor" },
   { href: "/agent_evaluation", label: "Agent Evaluation" },
 ];
 
