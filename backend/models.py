@@ -119,6 +119,43 @@ class LedgerEntry(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ViewerComment(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("comment"))
+    viewer: str = "viewer"
+    text: str
+    sku_id: str | None = None
+    suggested_reply: str | None = None
+    reply_status: Literal["suggested", "needs_host", "blocked", "none"] = "none"
+    intent: str | None = None
+    created_at: datetime = Field(default_factory=utc_now)
+
+
+class WordCloudTerm(BaseModel):
+    text: str
+    weight: int = Field(ge=1, le=10)
+    count: int = Field(ge=1)
+
+
+class ViewerInsightMetric(BaseModel):
+    label: str
+    count: int = Field(ge=1)
+    weight: int = Field(ge=1, le=10)
+
+
+class ViewerInsightSnapshot(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("insight"))
+    window_started_at: datetime
+    window_ended_at: datetime
+    active_sku_id: str | None = None
+    comment_count: int
+    terms: list[WordCloudTerm] = Field(default_factory=list)
+    intent_breakdown: list[ViewerInsightMetric] = Field(default_factory=list)
+    summary: str
+    suggested_replies: list[str] = Field(default_factory=list)
+    source_comment_ids: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class PendingAction(BaseModel):
     id: str = Field(default_factory=lambda: create_id("pending"))
     action: ProposedAction
@@ -133,6 +170,8 @@ class CommerceState(BaseModel):
     skus: list[SKU]
     flash_sale: FlashSale | None = None
     viewer_sessions: list[ViewerSession] = Field(default_factory=list)
+    viewer_comments: list[ViewerComment] = Field(default_factory=list)
+    viewer_insights: list[ViewerInsightSnapshot] = Field(default_factory=list)
     orders: list[Order] = Field(default_factory=list)
     pending_actions: list[PendingAction] = Field(default_factory=list)
     ledger: list[LedgerEntry] = Field(default_factory=list)
@@ -171,6 +210,10 @@ class ViewerLoginResponse(BaseModel):
 
 class PendingReplyRequest(BaseModel):
     reply_text: str | None = None
+
+
+class ViewerInsightRequest(BaseModel):
+    window_seconds: int = Field(default=180, ge=30, le=900)
 
 
 class CoHostDebugMessage(BaseModel):
