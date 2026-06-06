@@ -6,6 +6,7 @@ import {
   appendAgentReply,
   appendViewerMessage,
   defaultLocalRoomState,
+  markViewerMessageHandledByAgent,
   type LocalRoomState,
   readLocalRoomState,
   subscribeToLocalRoom,
@@ -428,7 +429,7 @@ export default function ViewerPage() {
       return;
     }
 
-    appendViewerMessage(trimmedMessage, viewerSession.username);
+    const viewerMessage = appendViewerMessage(trimmedMessage, viewerSession.username);
     if (viewerSessionIdRef.current) {
       void sendViewerMetricEvent(
         viewerSessionIdRef.current,
@@ -448,6 +449,7 @@ export default function ViewerPage() {
       );
       setBackendState(response.state);
       if (response.suggested_reply) {
+        markViewerMessageHandledByAgent(viewerMessage.id);
         appendAgentReply(response.suggested_reply);
         setRoomState(readLocalRoomState());
       }

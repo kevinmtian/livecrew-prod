@@ -126,6 +126,17 @@ type AgentFlowModel = {
 
 type AgentFlowNodeDraft = Omit<AgentFlowNode, "state">;
 
+type PrioritizedViewerChat = {
+  id: string;
+  viewer: string;
+  text: string;
+  isLive: boolean;
+  handledByAgent: boolean;
+  isProductRelated: boolean;
+  frequency: number;
+  createdAt: number;
+};
+
 const initialLedger: LedgerEvent[] = [
   {
     id: "evt-initial-001",
@@ -198,6 +209,66 @@ function formatHostLiveMetric(
       : "none";
   }
   return `${metrics.interaction_rate.toFixed(1)}%`;
+}
+
+function normalizeChatText(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function prioritizeViewerChats(
+  state: LocalRoomState,
+  activeSkuName: string,
+  activeSkuAliases: string[],
+  escalatedSourceTexts: string[],
+) {
+  const productTerms = [activeSkuName, ...activeSkuAliases]
+    .map(normalizeChatText)
+    .filter((term) => term.length >= 3);
+  const escalatedTextSet = new Set(escalatedSourceTexts.map(normalizeChatText));
+  const chats: PrioritizedViewerChat[] = state.viewerMessages.map((chat) => ({
+      id: chat.id,
+      viewer: chat.name,
+      text: chat.text,
+      isLive: true,
+      createdAt: chat.createdAt,
+      handledByAgent: chat.handledByAgent ?? false,
+      isProductRelated: false,
+      frequency: 1,
+    }));
+  const frequencyByText = chats.reduce<Record<string, number>>((counts, chat) => {
+    const key = normalizeChatText(chat.text);
+    counts[key] = (counts[key] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return chats
+    .filter((chat) => {
+      if (!chat.isLive) {
+        return true;
+      }
+      const normalizedText = normalizeChatText(chat.text);
+      if (escalatedTextSet.has(normalizedText)) {
+        return true;
+      }
+      return !chat.handledByAgent;
+    })
+    .map((chat) => {
+      const normalizedText = normalizeChatText(chat.text);
+      return {
+        ...chat,
+        isProductRelated: productTerms.some((term) => normalizedText.includes(term)),
+        frequency: frequencyByText[normalizedText] ?? 1,
+      };
+    })
+    .sort((first, second) => {
+      if (first.isProductRelated !== second.isProductRelated) {
+        return first.isProductRelated ? -1 : 1;
+      }
+      if (first.frequency !== second.frequency) {
+        return second.frequency - first.frequency;
+      }
+      return second.createdAt - first.createdAt;
+    });
 }
 
 function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
@@ -987,6 +1058,12 @@ export default function HostPage() {
         pending.requested_by === "concierge" &&
         pending.action.type === "suggest_reply",
     ) ?? [];
+  const prioritizedViewerChats = prioritizeViewerChats(
+    roomState,
+    backendActiveSku?.name ?? activeProduct.name,
+    backendActiveSku?.aliases ?? activeProduct.aliases,
+    conciergeEscalations.map((pending) => pending.action.source_text),
+  );
   const pendingConfirmations =
     backendState?.pending_actions.filter(
       (pending) =>
@@ -2132,12 +2209,63 @@ export default function HostPage() {
                 ) : null}
               </div>
             ) : null}
-
             {viewerMonitorError ? (
               <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
                 {viewerMonitorError}
               </p>
             ) : null}
+
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-900">
+                Prioritized viewer chat
+              </p>
+              <p className="text-xs font-medium text-slate-500">
+                Active SKU first
+              </p>
+            </div>
+            <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-1">
+              {prioritizedViewerChats.map((chat) => (
+                <div
+                  className={`rounded-md border p-3 ${
+                    chat.isProductRelated
+                      ? "border-teal-200 bg-teal-50"
+                      : chat.frequency > 1
+                        ? "border-amber-200 bg-amber-50"
+                        : chat.isLive
+                          ? "border-slate-200 bg-white"
+                          : "border-slate-200 bg-slate-50"
+                  }`}
+                  key={chat.id}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p
+                      className={`text-xs font-semibold ${
+                        chat.isProductRelated ? "text-teal-700" : "text-slate-500"
+                      }`}
+                    >
+                      {chat.viewer}
+                    </p>
+                    {chat.isProductRelated ? (
+                      <span className="rounded-sm bg-teal-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-teal-700">
+                        Active SKU
+                      </span>
+                    ) : chat.frequency > 1 ? (
+                      <span className="rounded-sm bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-700">
+                        Asked {chat.frequency}x
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="mt-1 text-sm leading-6 text-slate-800">
+                    {chat.text}
+                  </p>
+                </div>
+              ))}
+              {prioritizedViewerChats.length === 0 ? (
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                  No viewer chat needs host attention.
+                </p>
+              ) : null}
+            </div>
 
             <div className="mt-4 flex items-center justify-between gap-3">
               <p className="text-sm font-semibold text-slate-900">Latest queue</p>
