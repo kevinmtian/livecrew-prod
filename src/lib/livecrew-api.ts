@@ -55,6 +55,8 @@ export type BackendState = {
     created_at: string;
   } | null;
   viewer_sessions: ViewerSession[];
+  viewer_comments: ViewerComment[];
+  viewer_insights: ViewerInsightSnapshot[];
   orders: Array<{
     id: string;
     sku_id: string;
@@ -73,6 +75,43 @@ export type BackendState = {
     created_at: string;
   }>;
   updated_at: string;
+};
+
+export type ViewerComment = {
+  id: string;
+  viewer: string;
+  text: string;
+  sku_id: string | null;
+  suggested_reply: string | null;
+  reply_status: "suggested" | "needs_host" | "blocked" | "none";
+  intent: string | null;
+  created_at: string;
+};
+
+export type WordCloudTerm = {
+  text: string;
+  weight: number;
+  count: number;
+};
+
+export type ViewerInsightMetric = {
+  label: string;
+  count: number;
+  weight: number;
+};
+
+export type ViewerInsightSnapshot = {
+  id: string;
+  window_started_at: string;
+  window_ended_at: string;
+  active_sku_id: string | null;
+  comment_count: number;
+  terms: WordCloudTerm[];
+  intent_breakdown: ViewerInsightMetric[];
+  summary: string;
+  suggested_replies: string[];
+  source_comment_ids: string[];
+  created_at: string;
 };
 
 export type ViewerSession = {
@@ -256,6 +295,13 @@ export function sendEditedPendingReply(pendingActionId: string, replyText: strin
   return requestJson<WorkflowResponse>(`/actions/${pendingActionId}/reply`, {
     method: "POST",
     body: JSON.stringify({ reply_text: replyText }),
+  });
+}
+
+export function generateViewerWordCloud(windowSeconds = 180) {
+  return requestJson<ViewerInsightSnapshot>("/viewer-insights/word-cloud", {
+    method: "POST",
+    body: JSON.stringify({ window_seconds: windowSeconds }),
   });
 }
 

@@ -24,6 +24,8 @@ import {
   type CoHostDebugMessage,
   type MonitorSignalPayload,
   type PendingAction,
+  type ViewerComment,
+  type ViewerInsightSnapshot,
   type WorkflowResponse,
   approvePendingAction,
   createMediaSession,
@@ -32,6 +34,7 @@ import {
   fetchCoHostDebugMessages,
   fetchLiveMetrics,
   fetchMediaSession,
+  generateViewerWordCloud,
   getBackendUrl,
   postIceCandidate,
   postMediaOffer,
@@ -42,7 +45,6 @@ import {
   sendHostTranscript,
   stopMediaSession,
 } from "@/lib/livecrew-api";
-import { mockChat } from "@/lib/mock-data";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 type LedgerEvent = {
@@ -83,6 +85,8 @@ type RealtimeTranscriptionEvent = {
     message?: string;
   };
 };
+
+const MAX_VIEWER_MONITOR_QUEUE_ITEMS = 3;
 
 type AgentRole =
   | "Input"
@@ -234,6 +238,79 @@ function describePendingAction(pending: PendingAction, state: BackendState | nul
   ].filter(Boolean);
 
   return details.join(" · ");
+}
+
+function formatCommentTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function ViewerCommentCard({
+  comment,
+  ignored,
+  onIgnore,
+  onUseReply,
+}: {
+  comment: ViewerComment;
+  ignored: boolean;
+  onIgnore: () => void;
+  onUseReply: (reply: string) => void;
+}) {
+  const statusTone =
+    comment.reply_status === "blocked" || comment.reply_status === "needs_host"
+      ? "warning"
+      : comment.reply_status === "suggested"
+        ? "good"
+        : "neutral";
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-white p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-xs font-semibold text-slate-500">
+            {comment.viewer} {formatCommentTime(comment.created_at)}
+          </p>
+          {comment.intent ? (
+            <p className="mt-0.5 text-xs text-slate-400">
+              {comment.intent.replaceAll("_", " ")}
+            </p>
+          ) : null}
+        </div>
+        <StatusPill tone={statusTone}>
+          {ignored ? "ignored" : comment.reply_status.replaceAll("_", " ")}
+        </StatusPill>
+      </div>
+      <p className="mt-2 text-sm leading-6 text-slate-800">{comment.text}</p>
+      {comment.suggested_reply ? (
+        <div className="mt-3 rounded-md border border-teal-200 bg-teal-50 p-3">
+          <p className="text-sm leading-6 text-slate-700">
+            {comment.suggested_reply}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="min-h-9 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+              disabled={ignored}
+              onClick={() => onUseReply(comment.suggested_reply ?? "")}
+              type="button"
+            >
+              Use
+            </button>
+            <button
+              className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 disabled:text-slate-400"
+              disabled={ignored}
+              onClick={onIgnore}
+              type="button"
+            >
+              Ignore
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function clampText(value: string | null | undefined, fallback = "No detail") {
@@ -880,6 +957,11 @@ export default function HostPage() {
   const [cohostDebugMessages, setCohostDebugMessages] = useState<
     CoHostDebugMessage[]
   >([]);
+  const [wordCloudRefreshing, setWordCloudRefreshing] = useState(false);
+  const [viewerMonitorError, setViewerMonitorError] = useState("");
+  const [latestInsight, setLatestInsight] =
+    useState<ViewerInsightSnapshot | null>(null);
+  const [ignoredDraftIds, setIgnoredDraftIds] = useState<string[]>([]);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -889,6 +971,7 @@ export default function HostPage() {
   const completedTranscriptIdsRef = useRef<Set<string>>(new Set());
   const answerPollRef = useRef<number | null>(null);
   const viewerCandidateCountsRef = useRef<Map<string, number>>(new Map());
+  const refreshViewerWordCloudRef = useRef<() => Promise<void>>(async () => {});
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
   const backendActiveSku = backendState?.skus.find(
@@ -915,6 +998,14 @@ export default function HostPage() {
         ),
     ) ??
     [];
+  const viewerCommentCount = backendState?.viewer_comments.length ?? 0;
+  const recentViewerComments =
+    backendState?.viewer_comments.slice(0, MAX_VIEWER_MONITOR_QUEUE_ITEMS) ?? [];
+  const hiddenViewerCommentCount = Math.max(
+    0,
+    viewerCommentCount - recentViewerComments.length,
+  );
+  const activeInsight = latestInsight ?? backendState?.viewer_insights[0] ?? null;
   const agentFlow = buildAgentFlow({
     backendState,
     roomState,
@@ -946,10 +1037,18 @@ export default function HostPage() {
     const metricsPollId = window.setInterval(() => {
       void syncLiveMetrics();
     }, 3000);
+    const initialWordCloudId = window.setTimeout(() => {
+      void refreshViewerWordCloudRef.current();
+    }, 5000);
+    const wordCloudIntervalId = window.setInterval(() => {
+      void refreshViewerWordCloudRef.current();
+    }, 60000);
 
     return () => {
       window.clearInterval(backendPollId);
       window.clearInterval(metricsPollId);
+      window.clearTimeout(initialWordCloudId);
+      window.clearInterval(wordCloudIntervalId);
       if (answerPollRef.current) {
         window.clearInterval(answerPollRef.current);
       }
@@ -971,6 +1070,7 @@ export default function HostPage() {
       if (readLocalRoomState().activeSkuId !== nextSkuId) {
         setRoomActiveSku(nextSkuId);
       }
+      setViewerMonitorError("");
     } catch {
       setBackendStatus("offline");
     }
@@ -984,6 +1084,25 @@ export default function HostPage() {
       setHostLiveMetrics(null);
     }
   }
+
+  async function refreshViewerWordCloud() {
+    setWordCloudRefreshing(true);
+    try {
+      const snapshot = await generateViewerWordCloud(180);
+      setLatestInsight(snapshot);
+      setViewerMonitorError("");
+      await syncBackendState();
+    } catch (error) {
+      setViewerMonitorError(
+        error instanceof Error
+          ? error.message
+          : "Viewer word cloud refresh failed.",
+      );
+    } finally {
+      setWordCloudRefreshing(false);
+    }
+  }
+  refreshViewerWordCloudRef.current = refreshViewerWordCloud;
 
   function appendLedger(event: LedgerEvent) {
     setLedgerEvents((currentEvents) => [
@@ -1383,6 +1502,16 @@ export default function HostPage() {
     }
   }
 
+  function handleUseDraftReply(reply: string) {
+    setReplyInput(reply);
+  }
+
+  function handleIgnoreDraft(commentId: string) {
+    setIgnoredDraftIds((currentIds) =>
+      currentIds.includes(commentId) ? currentIds : [...currentIds, commentId],
+    );
+  }
+
   async function handleResetDemo() {
     try {
       const state = await resetBackendState();
@@ -1399,6 +1528,9 @@ export default function HostPage() {
     setInterimTranscript("");
     setLiveTranscriptError("");
     setHostInputTrace(null);
+    setLatestInsight(null);
+    setIgnoredDraftIds([]);
+    setViewerMonitorError("");
     setLedgerEvents(initialLedger);
     setQueueItems([
       {
@@ -1914,46 +2046,122 @@ export default function HostPage() {
         </Panel>
 
         <Panel
-          title="Viewer Chat"
-          eyebrow="Room messages"
+          title="Viewer AI Monitor"
+          eyebrow="Last three minutes"
           className="xl:col-start-2 xl:row-start-3"
         >
-            {roomState.monitorSignal?.signals.question_backlog &&
-            roomState.monitorSignal.signals.question_backlog !== "none" ? (
-              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
-                  Frequently asked
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-slate-900">
+                  Comment word cloud
                 </p>
-                <p className="mt-1 text-sm font-semibold leading-5 text-slate-950">
-                  {roomState.monitorSignal.signals.question_backlog}
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  {activeInsight
+                    ? `${activeInsight.comment_count} comments analyzed`
+                    : "Waiting for viewer comments"}
                 </p>
               </div>
+              <button
+                className="min-h-9 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-700 transition hover:border-teal-300 hover:text-teal-800 disabled:text-slate-400"
+                disabled={wordCloudRefreshing}
+                onClick={() => void refreshViewerWordCloud()}
+                type="button"
+              >
+                {wordCloudRefreshing ? "Refreshing" : "Refresh"}
+              </button>
+            </div>
+
+            {activeInsight ? (
+              <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <p className="text-sm leading-6 text-slate-700">
+                  {activeInsight.summary}
+                </p>
+                {(activeInsight.intent_breakdown ?? []).length > 0 ? (
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    {(activeInsight.intent_breakdown ?? [])
+                      .slice(0, 4)
+                      .map((metric) => (
+                        <div
+                          className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                          key={`${activeInsight.id}-${metric.label}`}
+                        >
+                          <p className="truncate text-xs font-medium text-slate-500">
+                            {metric.label}
+                          </p>
+                          <p className="mt-1 text-lg font-semibold text-slate-900">
+                            {metric.count}
+                          </p>
+                        </div>
+                      ))}
+                  </div>
+                ) : null}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {activeInsight.terms.length > 0 ? (
+                    activeInsight.terms.slice(0, 8).map((term) => (
+                      <span
+                        className="rounded-md border border-teal-200 bg-white px-2 py-1 font-semibold text-teal-800"
+                        key={`${activeInsight.id}-${term.text}`}
+                        style={{
+                          fontSize: `${12 + term.weight}px`,
+                          opacity: 0.56 + term.weight / 24,
+                        }}
+                        title={`${term.count} mention weight`}
+                      >
+                        {term.text}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-sm text-slate-400">
+                      No weighted terms yet.
+                    </span>
+                  )}
+                </div>
+                {activeInsight.suggested_replies.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    {activeInsight.suggested_replies.slice(0, 2).map((reply) => (
+                      <button
+                        className="w-full rounded-md border border-teal-200 bg-white px-3 py-2 text-left text-sm leading-6 text-slate-700 transition hover:border-teal-400 hover:text-teal-900"
+                        key={reply}
+                        onClick={() => handleUseDraftReply(reply)}
+                        type="button"
+                      >
+                        {reply}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             ) : null}
-            <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
-              {mockChat.map((chat) => (
-                <div
-                  className="rounded-md border border-slate-200 bg-slate-50 p-3"
-                  key={`${chat.viewer}-${chat.message}`}
-                >
-                  <p className="text-xs font-semibold text-slate-500">
-                    {chat.viewer}
-                  </p>
-                  <p className="mt-1 text-sm text-slate-800">{chat.message}</p>
-                </div>
+
+            {viewerMonitorError ? (
+              <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm leading-6 text-amber-800">
+                {viewerMonitorError}
+              </p>
+            ) : null}
+
+            <div className="mt-4 flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-slate-900">Latest queue</p>
+              {hiddenViewerCommentCount > 0 ? (
+                <p className="text-xs font-medium text-slate-500">
+                  {hiddenViewerCommentCount} more archived
+                </p>
+              ) : null}
+            </div>
+            <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-1">
+              {recentViewerComments.map((comment) => (
+                <ViewerCommentCard
+                  comment={comment}
+                  ignored={ignoredDraftIds.includes(comment.id)}
+                  key={comment.id}
+                  onIgnore={() => handleIgnoreDraft(comment.id)}
+                  onUseReply={handleUseDraftReply}
+                />
               ))}
-              {roomState.viewerMessages.map((chat) => (
-                <div
-                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
-                  key={chat.id}
-                >
-                  <p className="text-xs font-semibold text-teal-700">
-                    {chat.name}
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {chat.text}
-                  </p>
-                </div>
-              ))}
+              {recentViewerComments.length === 0 ? (
+                <p className="rounded-md border border-slate-200 bg-slate-50 px-3 py-4 text-sm text-slate-500">
+                  No queued viewer comments yet.
+                </p>
+              ) : null}
             </div>
         </Panel>
 

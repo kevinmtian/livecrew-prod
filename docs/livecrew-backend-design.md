@@ -242,6 +242,8 @@ class CommerceState(BaseModel):
     skus: list[SKU]
     flash_sale: FlashSale | None
     viewer_sessions: list[ViewerSession]
+    viewer_comments: list[ViewerComment]
+    viewer_insights: list[ViewerInsightSnapshot]
     orders: list[Order]
     announcements: list[Announcement]
     pending_actions: list[PendingAction]
@@ -254,11 +256,14 @@ Important rules:
 - `active_sku_id` represents the product currently displayed in the live room.
 - SKU stock and prices are backend source of truth.
 - Viewer sessions store active username-only logins for the current demo run.
+- Viewer comments are backend source of truth for ConciergeAgent replies and host word-cloud analysis.
+- Viewer insight snapshots summarize recent viewer demand for the host cockpit, including deterministic intent counts derived from stored viewer comments.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
 - Pending actions represent proposals waiting for host approval and must not change commerce state.
 - Reset restores SKUs to seeded stock and prices, then clears orders, flash sale, active SKU, announcements, pending actions, metrics, and ledger.
 - Reset clears viewer sessions so usernames can be reused in the next demo run.
+- Reset clears viewer comments and viewer insight snapshots.
 
 ## 7. Host Transcript and Text Commands as Action Stream
 
@@ -647,6 +652,7 @@ POST /events/host-transcript
 POST /events/host-command
 POST /events/viewer-message
 POST /events/realtime-transcription-token
+POST /viewer-insights/word-cloud
 GET  /debug/cohost-messages
 
 POST /viewer-login
@@ -818,6 +824,7 @@ Request:
 Response should include decisions, guardrail result, applied actions, ledger entries, and updated state.
 Irrelevant or ungrounded messages may return an empty `proposed_actions` list and `suggested_reply: null`.
 Risky messages return a pending ConciergeAgent `suggest_reply` action and `suggested_reply: null` until host review.
+The route records the raw viewer message in `CommerceState.viewer_comments` with viewer name, text, resolved SKU when available, reply status, intent, and suggested reply when one can be safely drafted.
 
 Preferred shared response shape:
 
@@ -833,6 +840,48 @@ class WorkflowResponse(BaseModel):
     report: ProducerReport | None
     state: CommerceState
 ```
+
+### `POST /viewer-insights/word-cloud`
+
+The host cockpit calls this once per minute and may call it manually for demo testing.
+
+Request:
+
+```json
+{
+  "window_seconds": 180
+}
+```
+
+Response:
+
+```python
+class ViewerInsightMetric(BaseModel):
+    label: str
+    count: int
+    weight: int
+
+class ViewerInsightSnapshot(BaseModel):
+    id: str
+    window_started_at: datetime
+    window_ended_at: datetime
+    active_sku_id: str | None
+    comment_count: int
+    terms: list[WordCloudTerm]
+    intent_breakdown: list[ViewerInsightMetric]
+    summary: str
+    suggested_replies: list[str]
+    source_comment_ids: list[str]
+    created_at: datetime
+```
+
+Rules:
+
+- Default window is 180 seconds.
+- Terms are sorted by descending weight.
+- Intent breakdown is computed deterministically from recorded viewer comment intent and guardrail status.
+- OpenAI may cluster terms and draft summary text, but the backend validates the returned term shape and falls back to deterministic extraction if needed.
+- The snapshot is stored in `CommerceState.viewer_insights` and a `viewer_word_cloud_generated` ledger entry is appended.
 
 ### Viewer Login Routes
 

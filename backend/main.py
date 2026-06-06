@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.agents.cohost import get_cohost_debug_messages, reset_cohost_context
 from backend.agents.monitor import analyze_monitor_signals
+from backend.agents.viewer_insights import generate_viewer_word_cloud
 from backend.commerce import apply_action, approve_pending_action, reject_pending_action
 from backend.graphs.livecrew_graph import run_cohost_workflow, run_concierge_workflow
 from backend.media_signaling import media_store
@@ -29,7 +30,10 @@ from backend.models import (
     CoHostDebugMessagesResponse,
     TextEventRequest,
     TranscriptionResponse,
+    ViewerComment,
     ViewerHeartbeatRequest,
+    ViewerInsightRequest,
+    ViewerInsightSnapshot,
     ViewerLoginRequest,
     ViewerLoginResponse,
     ViewerMessageRequest,
@@ -206,9 +210,75 @@ def host_transcript(request: TextEventRequest):
 
 @app.post("/events/viewer-message")
 def viewer_message(request: ViewerMessageRequest):
-    if not request.text.strip():
+    text = request.text.strip()
+    viewer = request.viewer.strip() or "viewer"
+    if not text:
         raise HTTPException(status_code=400, detail="Viewer message is required.")
-    return run_concierge_workflow(request.text.strip(), request.viewer.strip() or "viewer")
+
+    response = run_concierge_workflow(text, viewer)
+    first_action = response.proposed_actions[0] if response.proposed_actions else None
+    first_guardrail = response.guardrail_results[0] if response.guardrail_results else None
+    viewer_comment = ViewerComment(
+        viewer=viewer,
+        text=text,
+        sku_id=first_action.sku_id if first_action else None,
+        suggested_reply=response.suggested_reply or (first_action.reply_text if first_action else None),
+        reply_status=(
+            "suggested"
+            if response.suggested_reply
+            else "needs_host"
+            if first_guardrail and first_guardrail.status == "needs_host_confirmation"
+            else "blocked"
+            if first_guardrail and first_guardrail.status == "blocked"
+            else "none"
+        ),
+        intent=first_action.type if first_action else None,
+    )
+    ledger_entry = LedgerEntry(
+        type="viewer_message_received",
+        detail=f"{viewer} commented: {text}",
+        source_text=text,
+        payload={
+            "viewer": viewer,
+            "comment_id": viewer_comment.id,
+            "sku_id": viewer_comment.sku_id,
+            "reply_status": viewer_comment.reply_status,
+        },
+    )
+
+    state = response.state
+    state.viewer_comments = [viewer_comment, *state.viewer_comments][:200]
+    state.ledger = [ledger_entry, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    response.state = updated_state
+    response.ledger_entries = [ledger_entry, *response.ledger_entries]
+    return response
+
+
+@app.post("/viewer-insights/word-cloud", response_model=ViewerInsightSnapshot)
+def viewer_word_cloud(request: ViewerInsightRequest):
+    state = commerce_store.get()
+    snapshot = generate_viewer_word_cloud(state, request.window_seconds)
+    state.viewer_insights = [snapshot, *state.viewer_insights][:10]
+    state.ledger = [
+        LedgerEntry(
+            type="viewer_word_cloud_generated",
+            detail=f"Generated viewer word cloud from {snapshot.comment_count} recent comment(s).",
+            payload={
+                "snapshot_id": snapshot.id,
+                "window_seconds": request.window_seconds,
+                "comment_count": snapshot.comment_count,
+                "terms": [term.model_dump(mode="json") for term in snapshot.terms],
+                "intent_breakdown": [
+                    metric.model_dump(mode="json")
+                    for metric in snapshot.intent_breakdown
+                ],
+            },
+        ),
+        *state.ledger,
+    ][:200]
+    commerce_store.replace(state)
+    return snapshot
 
 
 @app.post("/events/monitor-signal", response_model=MonitorResponse)
