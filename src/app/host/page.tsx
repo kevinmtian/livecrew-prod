@@ -42,7 +42,6 @@ import {
   sendHostTranscript,
   stopMediaSession,
 } from "@/lib/livecrew-api";
-import { mockChat } from "@/lib/mock-data";
 import { type FormEvent, useEffect, useRef, useState } from "react";
 
 type LedgerEvent = {
@@ -307,6 +306,7 @@ export default function HostPage() {
   const completedTranscriptIdsRef = useRef<Set<string>>(new Set());
   const answerPollRef = useRef<number | null>(null);
   const viewerCandidateCountsRef = useRef<Map<string, number>>(new Map());
+  const refreshViewerWordCloudRef = useRef<() => Promise<void>>(async () => {});
 
   const activeProduct = getActiveSkuDisplay(activeSkuId);
   const backendActiveSku = backendState?.skus.find(
@@ -364,10 +364,10 @@ export default function HostPage() {
       void syncBackendState();
     }, 3000);
     const initialWordCloudId = window.setTimeout(() => {
-      void refreshViewerWordCloud();
+      void refreshViewerWordCloudRef.current();
     }, 5000);
     const wordCloudIntervalId = window.setInterval(() => {
-      void refreshViewerWordCloud();
+      void refreshViewerWordCloudRef.current();
     }, 60000);
 
     return () => {
@@ -418,6 +418,7 @@ export default function HostPage() {
       setWordCloudRefreshing(false);
     }
   }
+  refreshViewerWordCloudRef.current = refreshViewerWordCloud;
 
   function appendLedger(event: LedgerEvent) {
     setLedgerEvents((currentEvents) => [
@@ -1207,7 +1208,7 @@ export default function HostPage() {
         <Panel
           title="CoHost Agent Suggested Actions"
           eyebrow="CoHost Agent queue"
-          className="xl:col-start-2 xl:row-start-2"
+          className="xl:col-start-2 xl:row-start-2 xl:row-span-2"
         >
             <div className={boundedScrollAreaClass}>
               {pendingConfirmations.map((pending) => (
@@ -1268,39 +1269,6 @@ export default function HostPage() {
                   </div>
                   <p className="mt-2 text-sm leading-6 text-slate-700">
                     {item.detail}
-                  </p>
-                </div>
-              ))}
-            </div>
-        </Panel>
-
-        <Panel
-          title="Viewer Chat"
-          eyebrow="Room messages"
-          className="xl:col-start-2 xl:row-start-3"
-        >
-            <div className="space-y-3">
-              {mockChat.map((chat) => (
-                <div
-                  className="rounded-md border border-slate-200 bg-slate-50 p-3"
-                  key={`${chat.viewer}-${chat.message}`}
-                >
-                  <p className="text-xs font-semibold text-slate-500">
-                    {chat.viewer}
-                  </p>
-                  <p className="mt-1 text-sm text-slate-800">{chat.message}</p>
-                </div>
-              ))}
-              {roomState.viewerMessages.map((chat) => (
-                <div
-                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
-                  key={chat.id}
-                >
-                  <p className="text-xs font-semibold text-teal-700">
-                    {chat.name}
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {chat.text}
                   </p>
                 </div>
               ))}

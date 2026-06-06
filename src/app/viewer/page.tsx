@@ -349,8 +349,11 @@ export default function ViewerPage() {
       (session) => session.id === viewerSession.id,
     );
     if (!sessionStillActive) {
-      setViewerSession(null);
-      closeViewerPeer();
+      const clearSessionId = window.setTimeout(() => {
+        setViewerSession(null);
+        closeViewerPeer();
+      }, 0);
+      return () => window.clearTimeout(clearSessionId);
     }
   }, [backendState, closeViewerPeer, viewerSession]);
 
