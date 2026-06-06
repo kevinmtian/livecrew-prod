@@ -1,15 +1,43 @@
 from __future__ import annotations
 
+from datetime import timedelta
+from typing import Literal
+
 from backend.models import (
     AppliedAction,
     CommerceState,
     FlashSale,
     LedgerEntry,
+    Order,
     PendingAction,
     ProposedAction,
     GuardrailResult,
+    utc_now,
 )
 from backend.tools.sku_resolver import get_sku_by_id
+
+
+RequestedBy = Literal["cohost", "concierge", "guardrail", "host_ui"]
+
+
+def _requested_by(action: ProposedAction) -> RequestedBy:
+    if action.input_source == "viewer_message":
+        return "concierge"
+    if action.input_source == "host_ui":
+        return "host_ui"
+    return "cohost"
+
+
+def _flash_sale_applies(action: ProposedAction, state: CommerceState) -> bool:
+    if not state.flash_sale or not action.sku_id or not action.quantity:
+        return False
+    if state.flash_sale.sku_id != action.sku_id:
+        return False
+    if state.flash_sale.remaining_stock < action.quantity:
+        return False
+
+    ends_at = state.flash_sale.created_at + timedelta(seconds=state.flash_sale.duration_seconds)
+    return utc_now() <= ends_at
 
 
 def apply_action(
@@ -18,7 +46,11 @@ def apply_action(
     state: CommerceState,
 ) -> tuple[AppliedAction | None, LedgerEntry]:
     if guardrail.status == "needs_host_confirmation":
-        pending = PendingAction(action=action, guardrail_result=guardrail)
+        pending = PendingAction(
+            action=action,
+            guardrail_result=guardrail,
+            requested_by=_requested_by(action),
+        )
         state.pending_actions.insert(0, pending)
         return None, LedgerEntry(
             type="host_confirmation_requested",
@@ -33,6 +65,66 @@ def apply_action(
             detail=guardrail.reason,
             source_text=action.source_text,
             payload={"action": action.model_dump(mode="json")},
+        )
+
+    if action.type == "suggest_reply" and action.reply_text:
+        return (
+            AppliedAction(type=action.type, sku_id=action.sku_id, detail=action.reply_text),
+            LedgerEntry(
+                type="answer_suggested",
+                detail=action.reply_text,
+                source_text=action.source_text,
+                payload={
+                    "sku_id": action.sku_id,
+                    "viewer": action.viewer,
+                    "reply_text": action.reply_text,
+                    "evidence": action.evidence,
+                },
+            ),
+        )
+
+    if action.type == "create_order" and action.sku_id and action.quantity:
+        sku = get_sku_by_id(action.sku_id, state.skus)
+        if not sku:
+            return None, LedgerEntry(
+                type="guardrail_block",
+                detail="Order references an unknown SKU.",
+                source_text=action.source_text,
+                payload={"action": action.model_dump(mode="json")},
+            )
+
+        unit_price_cents = (
+            state.flash_sale.sale_price_cents
+            if _flash_sale_applies(action, state) and state.flash_sale
+            else sku.price_cents
+        )
+        sku.stock -= action.quantity
+        if (
+            state.flash_sale
+            and state.flash_sale.sku_id == action.sku_id
+            and unit_price_cents == state.flash_sale.sale_price_cents
+        ):
+            state.flash_sale.remaining_stock -= action.quantity
+
+        order = Order(
+            sku_id=action.sku_id,
+            quantity=action.quantity,
+            unit_price_cents=unit_price_cents,
+            viewer=action.viewer or "viewer",
+        )
+        state.orders.insert(0, order)
+        detail = (
+            f"Recorded order for {action.quantity} x {sku.name} at "
+            f"${unit_price_cents / 100:.2f}."
+        )
+        return (
+            AppliedAction(type=action.type, sku_id=action.sku_id, detail=detail),
+            LedgerEntry(
+                type="order_created",
+                detail=detail,
+                source_text=action.source_text,
+                payload=order.model_dump(mode="json"),
+            ),
         )
 
     if action.type == "set_active_sku" and action.sku_id:

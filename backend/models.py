@@ -13,6 +13,7 @@ ActionType = Literal[
     "restore_price",
     "create_flash_sale",
     "cancel_flash_sale",
+    "create_order",
     "suggest_reply",
     "request_host_confirmation",
     "noop",
@@ -57,11 +58,13 @@ class ProposedAction(BaseModel):
     source_text: str
     input_source: InputSource
     sku_id: str | None = None
+    quantity: int | None = None
     price_cents: int | None = None
     sale_price_cents: int | None = None
     duration_seconds: int | None = None
     stock_limit: int | None = None
     reply_text: str | None = None
+    viewer: str | None = None
     confidence: float = 0.0
     reason: str | None = None
     evidence: list[str] = Field(default_factory=list)
@@ -90,6 +93,15 @@ class AppliedAction(BaseModel):
     detail: str
 
 
+class Order(BaseModel):
+    id: str = Field(default_factory=lambda: create_id("order"))
+    sku_id: str
+    quantity: int
+    unit_price_cents: int
+    viewer: str
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class LedgerEntry(BaseModel):
     id: str = Field(default_factory=lambda: create_id("ledger"))
     type: str
@@ -103,6 +115,7 @@ class PendingAction(BaseModel):
     id: str = Field(default_factory=lambda: create_id("pending"))
     action: ProposedAction
     guardrail_result: GuardrailResult
+    requested_by: Literal["cohost", "concierge", "guardrail", "host_ui"] = "guardrail"
     status: Literal["pending", "approved", "rejected", "overridden"] = "pending"
     created_at: datetime = Field(default_factory=utc_now)
 
@@ -111,6 +124,7 @@ class CommerceState(BaseModel):
     active_sku_id: str | None = None
     skus: list[SKU]
     flash_sale: FlashSale | None = None
+    orders: list[Order] = Field(default_factory=list)
     pending_actions: list[PendingAction] = Field(default_factory=list)
     ledger: list[LedgerEntry] = Field(default_factory=list)
     updated_at: datetime = Field(default_factory=utc_now)
@@ -123,6 +137,7 @@ class WorkflowResponse(BaseModel):
     pending_actions: list[PendingAction] = Field(default_factory=list)
     applied_actions: list[AppliedAction] = Field(default_factory=list)
     ledger_entries: list[LedgerEntry] = Field(default_factory=list)
+    suggested_reply: str | None = None
     state: CommerceState
 
 
@@ -134,6 +149,10 @@ class TextEventRequest(BaseModel):
 class ViewerMessageRequest(BaseModel):
     viewer: str = "viewer"
     text: str
+
+
+class PendingReplyRequest(BaseModel):
+    reply_text: str | None = None
 
 
 class TranscriptionResponse(BaseModel):

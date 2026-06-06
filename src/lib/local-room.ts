@@ -190,6 +190,23 @@ export function appendHostReply(text: string) {
   return reply;
 }
 
+export function appendAgentReply(text: string) {
+  const reply: RoomMessage = {
+    id: createId("agent-reply"),
+    sender: "agent",
+    name: "LiveCrew Agent",
+    text,
+    createdAt: Date.now(),
+  };
+
+  writeLocalRoomState((currentState) => ({
+    ...currentState,
+    replies: [...currentState.replies, reply].slice(-MAX_MESSAGES),
+  }));
+
+  return reply;
+}
+
 export function setHostMediaSession(
   mediaSessionId: string | null,
   hostStreamStatus: LocalRoomState["hostStreamStatus"],

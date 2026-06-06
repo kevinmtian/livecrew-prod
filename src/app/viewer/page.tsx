@@ -3,6 +3,7 @@
 import { AppShell, StatusPill } from "@/components/dashboard";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
+  appendAgentReply,
   appendViewerMessage,
   defaultLocalRoomState,
   type LocalRoomState,
@@ -17,6 +18,7 @@ import {
   getBackendUrl,
   postIceCandidate,
   postMediaAnswer,
+  sendViewerMessage,
 } from "@/lib/livecrew-api";
 import { mockChat } from "@/lib/mock-data";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -71,8 +73,11 @@ export default function ViewerPage() {
   const [streamError, setStreamError] = useState("");
   const [backendState, setBackendState] = useState<BackendState | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [messageStatus, setMessageStatus] = useState<"idle" | "sending">("idle");
+  const [messageError, setMessageError] = useState("");
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const chatListRef = useRef<HTMLDivElement | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const sessionIdRef = useRef<string | null>(null);
   const hostCandidateCountRef = useRef(0);
@@ -104,6 +109,9 @@ export default function ViewerPage() {
     Boolean(activeFlashSale) &&
     flashSaleSecondsLeft > 0 &&
     (activeFlashSale?.remaining_stock ?? 0) > 0;
+  const liveRoomMessages = [...roomState.viewerMessages, ...roomState.replies].sort(
+    (firstMessage, secondMessage) => firstMessage.createdAt - secondMessage.createdAt,
+  );
 
   const syncBackendState = useCallback(async () => {
     try {
@@ -227,7 +235,14 @@ export default function ViewerPage() {
     };
   }, [connectToLatestStream, syncBackendState]);
 
-  function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    chatListRef.current?.scrollTo({
+      top: chatListRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [roomState.updatedAt, messageStatus]);
+
+  async function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const trimmedMessage = messageInput.trim();
@@ -239,6 +254,23 @@ export default function ViewerPage() {
     appendViewerMessage(trimmedMessage, "You");
     setRoomState(readLocalRoomState());
     setMessageInput("");
+    setMessageStatus("sending");
+    setMessageError("");
+
+    try {
+      const response = await sendViewerMessage(trimmedMessage, "You");
+      setBackendState(response.state);
+      if (response.suggested_reply) {
+        appendAgentReply(response.suggested_reply);
+        setRoomState(readLocalRoomState());
+      }
+    } catch (error) {
+      setMessageError(
+        error instanceof Error ? error.message : "Viewer message failed.",
+      );
+    } finally {
+      setMessageStatus("idle");
+    }
   }
 
   return (
@@ -360,7 +392,10 @@ export default function ViewerPage() {
             <StatusPill tone="good">Synced</StatusPill>
           </div>
 
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
+          <div
+            className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3"
+            ref={chatListRef}
+          >
             {initialReplies.map((reply) => (
               <div
                 className={`max-w-[88%] rounded-md border px-3 py-2 ${
@@ -395,32 +430,34 @@ export default function ViewerPage() {
                 </p>
               </div>
             ))}
-            {roomState.replies.map((reply) => (
-              <div
-                className="max-w-[88%] rounded-md border border-teal-200 bg-teal-50 px-3 py-2"
-                key={reply.id}
-              >
-                <p className="text-xs font-semibold text-teal-700">
-                  {reply.name}
-                </p>
-                <p className="mt-1 text-sm leading-5 text-slate-800">
-                  {reply.text}
-                </p>
-              </div>
-            ))}
-            {roomState.viewerMessages.map((chat) => (
-              <div
-                className="ml-auto max-w-[88%] rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
-                key={chat.id}
-              >
-                <p className="text-xs font-semibold text-slate-500">
-                  {chat.name}
-                </p>
-                <p className="mt-1 text-sm leading-5 text-slate-800">
-                  {chat.text}
-                </p>
-              </div>
-            ))}
+            {liveRoomMessages.map((message) => {
+              const isViewer = message.sender === "viewer";
+              const isAgent = message.sender === "agent";
+
+              return (
+                <div
+                  className={`max-w-[88%] rounded-md border px-3 py-2 ${
+                    isViewer
+                      ? "ml-auto border-slate-200 bg-slate-50"
+                      : isAgent
+                        ? "border-teal-200 bg-teal-50"
+                        : "border-slate-200 bg-white"
+                  }`}
+                  key={message.id}
+                >
+                  <p
+                    className={`text-xs font-semibold ${
+                      isAgent ? "text-teal-700" : "text-slate-500"
+                    }`}
+                  >
+                    {message.name}
+                  </p>
+                  <p className="mt-1 text-sm leading-5 text-slate-800">
+                    {message.text}
+                  </p>
+                </div>
+              );
+            })}
           </div>
 
           <form
@@ -438,12 +475,18 @@ export default function ViewerPage() {
               value={messageInput}
             />
             <button
-              className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800"
+              className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
+              disabled={messageStatus === "sending"}
               type="submit"
             >
-              Send
+              {messageStatus === "sending" ? "Sending" : "Send"}
             </button>
           </form>
+          {messageError ? (
+            <p className="border-t border-amber-100 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">
+              {messageError}
+            </p>
+          ) : null}
         </section>
       </div>
     </AppShell>
