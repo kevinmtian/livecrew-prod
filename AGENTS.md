@@ -33,10 +33,22 @@ Use the simplest stable stack:
 - TypeScript
 - Tailwind CSS
 - Local mock data first
-- Python FastAPI only when the backend commerce step is requested
-- OpenAI API only after the deterministic UI, analyzer, backend, and eval flow work
+- Python FastAPI backend under `backend/`
+- LangGraph for backend agent orchestration
+- OpenAI API for realtime host transcription and structured agent behavior, behind deterministic contracts and guardrails
 
-Avoid unnecessary dependencies or external services. Do not use RTMP, Qdrant, real Shopee APIs, complex databases, or production-scale realtime infrastructure for the MVP unless explicitly requested.
+Avoid unnecessary dependencies or external services. Do not use RTMP, Qdrant, real Shopee APIs, complex databases, or production-scale realtime infrastructure for the MVP unless explicitly requested. Browser-native media capture and lightweight WebRTC signaling are in scope for the host-to-viewer demo stream.
+
+## Document-Driven Development
+
+All development is document-driven.
+
+- Update `docs/livecrew-feature-requirements.md` before changing user-visible product behavior.
+- Update `docs/livecrew-backend-design.md` before changing backend routes, models, graph flow, module boundaries, action types, ledger events, OpenAI integration, or media signaling.
+- Implement only after the relevant requirement and backend contract are documented.
+- If code needs to diverge from the documents, update the documents first.
+- The Python backend is the source of truth for agent decisions, commerce state, guardrails, ledger events, OpenAI calls, and report metrics.
+- Next.js should render UI, capture browser media, call the Python backend, and subscribe to backend updates. It should not implement parallel backend truth in API routes or local storage once the Python backend contract exists.
 
 ## Routes
 
@@ -66,7 +78,7 @@ Prioritize these components:
 
 ## Domain Data
 
-Use a shared local catalogue before any backend or OpenAI integration. The seeded SKUs are:
+Use a shared local catalogue across frontend, backend, agent analyzer, and evaluation suite. The seeded SKUs are:
 1. GlowFix Vitamin C Serum
 2. HydraMist Cushion SPF
 3. Bamboo Thermal Tumbler
@@ -85,10 +97,10 @@ Keep shared helpers reusable across host, viewer, agent analyzer, and evaluation
 
 - Prefer simple, readable, stable code over clever abstractions.
 - Use mock data before API integration.
-- Keep state local until a prompt explicitly requests local room messaging or backend state.
+- Keep temporary UI state local only until the documented Python backend contract exists for that state.
 - Keep components small and easy to edit.
 - Do not add new production dependencies without explaining why.
-- Do not integrate OpenAI until the optional OpenAI step is requested.
+- OpenAI integration has been requested for realtime host transcription and agent reasoning, but must remain server-side and behind deterministic validation.
 - Do not let model output override deterministic commerce guardrails, SKU resolution, order quantity, backend KPI numbers, or listed SKU calculation.
 - After major changes, run the requested checks and fix errors.
 - If something is risky for a one-day hackathon, propose and implement a simpler fallback when possible.
@@ -105,7 +117,7 @@ Keep shared helpers reusable across host, viewer, agent analyzer, and evaluation
 
 ## Commerce Backend Rules
 
-When the Python FastAPI backend is requested, keep it simple and in-memory for the demo.
+The Python FastAPI backend has been requested. Keep it simple and in-memory for the demo, and orchestrate agent flow with LangGraph.
 
 Backend state should include:
 - `active_sku_id`
@@ -117,11 +129,11 @@ Backend state should include:
 
 Every commerce action must append to the event ledger. Orders must record SKU id, quantity, price, and viewer. Reset must clear orders, flash sale, active SKU, and ledger.
 
-Host and viewer should treat backend commerce state as the source of truth once backend integration exists.
+Host and viewer should treat Python backend commerce state as the source of truth as soon as the corresponding backend contract is implemented.
 
 ## Agent Analyzer Rules
 
-The deterministic analyzer is the source of truth for the demo until an optional OpenAI layer is added.
+The deterministic analyzer and guardrail layer remain the safety source of truth. OpenAI may classify intent and draft structured actions, but its output must pass deterministic validation before execution.
 
 It should classify viewer messages into the requested commerce and safety intents, including:
 - product facts

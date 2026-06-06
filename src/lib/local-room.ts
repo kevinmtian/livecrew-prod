@@ -16,6 +16,8 @@ export type LocalRoomState = {
   activeSkuId: SkuId;
   viewerMessages: RoomMessage[];
   replies: RoomMessage[];
+  mediaSessionId: string | null;
+  hostStreamStatus: "offline" | "starting" | "live";
   updatedAt: number;
 };
 
@@ -27,6 +29,8 @@ export const defaultLocalRoomState: LocalRoomState = {
   activeSkuId: defaultActiveSkuId,
   viewerMessages: [],
   replies: [],
+  mediaSessionId: null,
+  hostStreamStatus: "offline",
   updatedAt: 0,
 };
 
@@ -85,6 +89,15 @@ export function readLocalRoomState(): LocalRoomState {
       activeSkuId: activeSku?.id ?? defaultActiveSkuId,
       viewerMessages: normalizeMessages(parsedState.viewerMessages),
       replies: normalizeMessages(parsedState.replies),
+      mediaSessionId:
+        typeof parsedState.mediaSessionId === "string"
+          ? parsedState.mediaSessionId
+          : null,
+      hostStreamStatus:
+        parsedState.hostStreamStatus === "starting" ||
+        parsedState.hostStreamStatus === "live"
+          ? parsedState.hostStreamStatus
+          : "offline",
       updatedAt:
         typeof parsedState.updatedAt === "number" ? parsedState.updatedAt : 0,
     };
@@ -175,6 +188,17 @@ export function appendHostReply(text: string) {
   }));
 
   return reply;
+}
+
+export function setHostMediaSession(
+  mediaSessionId: string | null,
+  hostStreamStatus: LocalRoomState["hostStreamStatus"],
+) {
+  writeLocalRoomState((currentState) => ({
+    ...currentState,
+    mediaSessionId,
+    hostStreamStatus,
+  }));
 }
 
 export function resetLocalRoomState() {

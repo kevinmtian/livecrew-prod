@@ -1,6 +1,6 @@
 "use client";
 
-import { AppShell, Panel, StatusPill } from "@/components/dashboard";
+import { AppShell, StatusPill } from "@/components/dashboard";
 import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
   appendViewerMessage,
@@ -9,8 +9,17 @@ import {
   readLocalRoomState,
   subscribeToLocalRoom,
 } from "@/lib/local-room";
+import {
+  type BackendState,
+  fetchBackendState,
+  fetchLatestMediaSession,
+  fetchMediaSession,
+  getBackendUrl,
+  postIceCandidate,
+  postMediaAnswer,
+} from "@/lib/livecrew-api";
 import { mockChat } from "@/lib/mock-data";
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 
 type RoomReply = {
   id: string;
@@ -34,13 +43,6 @@ const initialReplies: RoomReply[] = [
       "GlowFix Vitamin C Serum is a 30 ml brightening serum designed for morning skincare routines.",
     tone: "agent",
   },
-  {
-    id: "reply-agent-002",
-    sender: "LiveCrew Agent",
-    message:
-      "Unverified discounts need host confirmation before they are shared in chat.",
-    tone: "agent",
-  },
 ];
 
 const flashSale = {
@@ -49,13 +51,129 @@ const flashSale = {
   secondsLeft: 90,
 };
 
+function formatPrice(priceCents: number) {
+  return `$${(priceCents / 100).toFixed(2)}`;
+}
+
 export default function ViewerPage() {
   const [roomState, setRoomState] =
     useState<LocalRoomState>(defaultLocalRoomState);
   const [messageInput, setMessageInput] = useState("");
-  const activeProduct = getActiveSkuDisplay(
-    roomState.activeSkuId ?? defaultActiveSkuId,
+  const [connectionStatus, setConnectionStatus] = useState<
+    "offline" | "connecting" | "live"
+  >("offline");
+  const [streamError, setStreamError] = useState("");
+  const [backendState, setBackendState] = useState<BackendState | null>(null);
+
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const hostCandidateCountRef = useRef(0);
+  const pollRef = useRef<number | null>(null);
+
+  const fallbackProduct = getActiveSkuDisplay(
+    backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
   );
+  const activeBackendSku = backendState?.skus.find(
+    (sku) => sku.id === backendState.active_sku_id,
+  );
+  const displayProduct = {
+    name: activeBackendSku?.name ?? fallbackProduct.name,
+    price: activeBackendSku
+      ? formatPrice(activeBackendSku.price_cents)
+      : fallbackProduct.price,
+    stock: activeBackendSku?.stock ?? fallbackProduct.stock,
+    facts: activeBackendSku?.facts ?? fallbackProduct.facts,
+  };
+
+  const syncBackendState = useCallback(async () => {
+    try {
+      const state = await fetchBackendState();
+      setBackendState(state);
+    } catch {
+      setBackendState(null);
+    }
+  }, []);
+
+  const connectToLatestStream = useCallback(async () => {
+    if (peerRef.current) {
+      return;
+    }
+
+    setConnectionStatus("connecting");
+    setStreamError("");
+
+    try {
+      const session = await fetchLatestMediaSession();
+      if (!session.offer || session.status === "stopped") {
+        setConnectionStatus("offline");
+        return;
+      }
+
+      sessionIdRef.current = session.session_id;
+      hostCandidateCountRef.current = 0;
+      const peer = new RTCPeerConnection({
+        iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+      });
+      peerRef.current = peer;
+
+      peer.ontrack = (event) => {
+        const [stream] = event.streams;
+        if (remoteVideoRef.current && stream) {
+          remoteVideoRef.current.srcObject = stream;
+          setConnectionStatus("live");
+        }
+      };
+      peer.onconnectionstatechange = () => {
+        if (["failed", "closed", "disconnected"].includes(peer.connectionState)) {
+          setConnectionStatus("offline");
+          peerRef.current = null;
+        }
+      };
+      peer.onicecandidate = (event) => {
+        if (event.candidate && sessionIdRef.current) {
+          void postIceCandidate(
+            sessionIdRef.current,
+            "viewer",
+            event.candidate.toJSON(),
+          );
+        }
+      };
+
+      await peer.setRemoteDescription(session.offer);
+      const answer = await peer.createAnswer();
+      await peer.setLocalDescription(answer);
+      await postMediaAnswer(session.session_id, answer);
+
+      pollRef.current = window.setInterval(async () => {
+        if (!sessionIdRef.current || !peerRef.current) {
+          return;
+        }
+        const latest = await fetchMediaSession(sessionIdRef.current);
+        if (latest.status === "stopped") {
+          peerRef.current.close();
+          peerRef.current = null;
+          setConnectionStatus("offline");
+          return;
+        }
+        const newCandidates = latest.host_candidates.slice(
+          hostCandidateCountRef.current,
+        );
+        hostCandidateCountRef.current = latest.host_candidates.length;
+        for (const candidate of newCandidates) {
+          await peerRef.current.addIceCandidate(candidate);
+        }
+      }, 1000);
+    } catch (error) {
+      setConnectionStatus("offline");
+      peerRef.current = null;
+      setStreamError(
+        error instanceof Error
+          ? error.message
+          : "Unable to connect to host stream.",
+      );
+    }
+  }, []);
 
   useEffect(() => {
     function syncRoomState() {
@@ -63,9 +181,28 @@ export default function ViewerPage() {
     }
 
     syncRoomState();
+    const unsubscribe = subscribeToLocalRoom(syncRoomState);
+    const initialSyncId = window.setTimeout(() => {
+      void syncBackendState();
+      void connectToLatestStream();
+    }, 0);
+    const reconnectId = window.setInterval(() => {
+      void syncBackendState();
+      if (!peerRef.current) {
+        void connectToLatestStream();
+      }
+    }, 3000);
 
-    return subscribeToLocalRoom(syncRoomState);
-  }, []);
+    return () => {
+      unsubscribe();
+      window.clearTimeout(initialSyncId);
+      window.clearInterval(reconnectId);
+      if (pollRef.current) {
+        window.clearInterval(pollRef.current);
+      }
+      peerRef.current?.close();
+    };
+  }, [connectToLatestStream, syncBackendState]);
 
   function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -85,138 +222,183 @@ export default function ViewerPage() {
     <AppShell
       eyebrow="Viewer"
       title="Customer livestream room"
-      description="A local mock viewer surface with the active product, offer state, and chat preview."
+      description={`Python backend: ${getBackendUrl()}`}
     >
-      <div className="grid gap-4 lg:grid-cols-[0.85fr_1.15fr]">
-        <Panel title="Active Product" eyebrow="Now featured">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
-            <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="mx-auto flex h-[calc(100dvh-11rem)] max-h-[860px] w-full max-w-[430px] flex-col overflow-hidden rounded-lg border border-slate-300 bg-slate-950 shadow-sm">
+        <section className="relative flex-[2] overflow-hidden bg-slate-950">
+          <video
+            autoPlay
+            className="absolute inset-0 h-full w-full object-cover"
+            playsInline
+            ref={remoteVideoRef}
+          />
+
+          <div className="absolute inset-x-0 top-0 flex items-center justify-between bg-gradient-to-b from-black/65 to-transparent px-4 py-3 text-white">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-white/70">
+                LiveCrew
+              </p>
+              <p className="text-sm font-semibold">Customer live room</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${
+                  connectionStatus === "live" ? "bg-emerald-400" : "bg-amber-300"
+                }`}
+              />
+              <span className="text-xs font-medium capitalize">
+                {connectionStatus}
+              </span>
+            </div>
+          </div>
+
+          {connectionStatus !== "live" ? (
+            <div className="absolute inset-0 flex items-center justify-center px-6 text-center">
               <div>
-                <h2 className="text-xl font-semibold text-slate-950">
-                  {activeProduct.name}
-                </h2>
-                <p className="mt-2 text-2xl font-semibold text-teal-800">
-                  {activeProduct.price}
+                <p className="text-base font-semibold text-white">
+                  Host stream is {connectionStatus}
+                </p>
+                <p className="mt-2 text-sm leading-6 text-white/70">
+                  Start the stream from the host cockpit, then connect here.
+                </p>
+                <button
+                  className="mt-4 min-h-10 rounded-md border border-white/20 bg-white px-4 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
+                  onClick={() => void connectToLatestStream()}
+                  type="button"
+                >
+                  Connect
+                </button>
+                {streamError ? (
+                  <p className="mt-3 text-xs leading-5 text-amber-200">
+                    {streamError}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="absolute inset-x-3 bottom-3 rounded-md border border-white/15 bg-white/92 p-3 shadow-sm backdrop-blur">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <p className="truncate text-base font-semibold text-slate-950">
+                  {displayProduct.name}
+                </p>
+                <p className="mt-1 text-sm font-semibold text-teal-800">
+                  {displayProduct.price}
                 </p>
               </div>
-              <StatusPill tone="good">{activeProduct.stock} left</StatusPill>
+              <span className="shrink-0 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1 text-xs font-medium text-emerald-700">
+                {displayProduct.stock} left
+              </span>
             </div>
-            <ul className="mt-5 space-y-2 text-sm leading-6 text-slate-700">
-              {activeProduct.facts.map((fact) => (
-                <li key={fact}>- {fact}</li>
-              ))}
-            </ul>
-          </div>
-          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm font-semibold text-amber-900">
-                Limited-time offer
-              </p>
-              <StatusPill tone="warning">
-                ends in {flashSale.secondsLeft}s
-              </StatusPill>
-            </div>
-            <p className="mt-2 text-sm text-amber-800">
-              {flashSale.sold}/{flashSale.total} left
+            <p className="mt-2 max-h-10 overflow-hidden text-sm leading-5 text-slate-700">
+              {displayProduct.facts.slice(0, 2).join(". ")}
             </p>
+            <div className="mt-3 flex items-center justify-between rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+              <p className="text-xs font-semibold text-amber-900">
+                Limited offer
+              </p>
+              <p className="text-xs text-amber-800">
+                {flashSale.sold}/{flashSale.total} left · {flashSale.secondsLeft}s
+              </p>
+            </div>
           </div>
-        </Panel>
-        <div className="grid gap-4">
-          <Panel title="Host and Agent Replies" eyebrow="Room replies">
-            <div className="space-y-3">
-              {initialReplies.map((reply) => (
-                <div
-                  className={`rounded-md border p-3 ${
-                    reply.tone === "agent"
-                      ? "border-teal-200 bg-teal-50"
-                      : "border-slate-200 bg-slate-50"
-                  }`}
-                  key={reply.id}
-                >
-                  <p
-                    className={`text-xs font-semibold ${
-                      reply.tone === "agent"
-                        ? "text-teal-700"
-                        : "text-slate-500"
-                    }`}
-                  >
-                    {reply.sender}
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {reply.message}
-                  </p>
-                </div>
-              ))}
-              {roomState.replies.map((reply) => (
-                <div
-                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
-                  key={reply.id}
-                >
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <p className="text-xs font-semibold text-teal-700">
-                      {reply.name}
-                    </p>
-                    <StatusPill tone="good">Synced</StatusPill>
-                  </div>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {reply.text}
-                  </p>
-                </div>
-              ))}
+        </section>
+
+        <section className="flex min-h-0 flex-1 flex-col border-t border-slate-200 bg-white">
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+            <div>
+              <p className="text-sm font-semibold text-slate-950">Live chat</p>
+              <p className="text-xs text-slate-500">Viewer messages and replies</p>
             </div>
-          </Panel>
-          <Panel title="Viewer Chat" eyebrow="Local messages">
-            <div className="max-h-[28rem] space-y-3 overflow-y-auto pr-1">
-              {mockChat.map((chat) => (
-                <div
-                  className="rounded-md border border-slate-200 bg-slate-50 p-3"
-                  key={`${chat.viewer}-${chat.message}`}
-                >
-                  <p className="text-xs font-semibold text-slate-500">
-                    {chat.viewer}
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {chat.message}
-                  </p>
-                </div>
-              ))}
-              {roomState.viewerMessages.map((chat) => (
-                <div
-                  className="rounded-md border border-teal-200 bg-teal-50 p-3"
-                  key={chat.id}
-                >
-                  <p className="text-xs font-semibold text-teal-700">
-                    {chat.name}
-                  </p>
-                  <p className="mt-1 text-sm leading-6 text-slate-800">
-                    {chat.text}
-                  </p>
-                </div>
-              ))}
-            </div>
-            <form
-              className="mt-4 flex flex-col gap-2 sm:flex-row"
-              onSubmit={handleSubmitMessage}
-            >
-              <label className="sr-only" htmlFor="viewer-message">
-                Viewer message
-              </label>
-              <input
-                className="min-h-11 flex-1 rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-teal-500"
-                id="viewer-message"
-                onChange={(event) => setMessageInput(event.target.value)}
-                placeholder="Ask about the active product"
-                value={messageInput}
-              />
-              <button
-                className="min-h-11 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800"
-                type="submit"
+            <StatusPill tone="good">Synced</StatusPill>
+          </div>
+
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
+            {initialReplies.map((reply) => (
+              <div
+                className={`max-w-[88%] rounded-md border px-3 py-2 ${
+                  reply.tone === "agent"
+                    ? "border-teal-200 bg-teal-50"
+                    : "border-slate-200 bg-slate-50"
+                }`}
+                key={reply.id}
               >
-                Send
-              </button>
-            </form>
-          </Panel>
-        </div>
+                <p
+                  className={`text-xs font-semibold ${
+                    reply.tone === "agent" ? "text-teal-700" : "text-slate-500"
+                  }`}
+                >
+                  {reply.sender}
+                </p>
+                <p className="mt-1 text-sm leading-5 text-slate-800">
+                  {reply.message}
+                </p>
+              </div>
+            ))}
+            {mockChat.slice(0, 3).map((chat) => (
+              <div
+                className="ml-auto max-w-[88%] rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+                key={`${chat.viewer}-${chat.message}`}
+              >
+                <p className="text-xs font-semibold text-slate-500">
+                  {chat.viewer}
+                </p>
+                <p className="mt-1 text-sm leading-5 text-slate-800">
+                  {chat.message}
+                </p>
+              </div>
+            ))}
+            {roomState.replies.map((reply) => (
+              <div
+                className="max-w-[88%] rounded-md border border-teal-200 bg-teal-50 px-3 py-2"
+                key={reply.id}
+              >
+                <p className="text-xs font-semibold text-teal-700">
+                  {reply.name}
+                </p>
+                <p className="mt-1 text-sm leading-5 text-slate-800">
+                  {reply.text}
+                </p>
+              </div>
+            ))}
+            {roomState.viewerMessages.map((chat) => (
+              <div
+                className="ml-auto max-w-[88%] rounded-md border border-slate-200 bg-slate-50 px-3 py-2"
+                key={chat.id}
+              >
+                <p className="text-xs font-semibold text-slate-500">
+                  {chat.name}
+                </p>
+                <p className="mt-1 text-sm leading-5 text-slate-800">
+                  {chat.text}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <form
+            className="flex gap-2 border-t border-slate-100 bg-white p-3"
+            onSubmit={handleSubmitMessage}
+          >
+            <label className="sr-only" htmlFor="viewer-message">
+              Viewer message
+            </label>
+            <input
+              className="min-h-10 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none transition focus:border-teal-500 focus:bg-white"
+              id="viewer-message"
+              onChange={(event) => setMessageInput(event.target.value)}
+              placeholder="Ask about this product"
+              value={messageInput}
+            />
+            <button
+              className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800"
+              type="submit"
+            >
+              Send
+            </button>
+          </form>
+        </section>
       </div>
     </AppShell>
   );

@@ -8,11 +8,12 @@ The experience should feel like:
 
 ```text
 Host speaks naturally
--> backend understands the intended commerce action
+-> OpenAI realtime transcription produces host transcript events
+-> CoHostAgent uses OpenAI LLM structured output to identify intent
 -> backend validates the action
 -> frontend updates the live room
--> viewer questions are answered from current commerce reality
--> post-stream report is generated from recorded facts
+-> ConciergeAgent answers viewer questions from current commerce reality
+-> ProducerAgent generates a post-stream report from recorded facts
 ```
 
 This document describes the first target product capabilities and the extension rules for future capabilities. It is not intended to be a complete final requirement list. The backend technical design is documented separately in `docs/livecrew-backend-design.md`.
@@ -20,12 +21,16 @@ This document describes the first target product capabilities and the extension 
 ## 2. Product Principles
 
 - The host should be able to operate the live room without clicking through complex controls.
+- Host speech should be transcribed in real time through the OpenAI API before it enters the agent workflow.
 - The frontend should reflect backend commerce state as the source of truth.
+- Agents should use the OpenAI API for language understanding, grounded reply drafting, and report generation in the OpenAI-enabled demo path.
 - Agents may propose actions and replies, but deterministic backend services must execute commerce changes.
+- LLM output must be structured, validated, and visible in the UI before it affects commerce state.
 - The system should prefer host confirmation over risky automation.
 - Viewer-facing answers must be grounded in product facts and current live commerce state.
 - Every important action should be recorded so the post-stream report can explain what happened.
 - The framework should stay structured, cohesive, loosely coupled, and easy to extend as new livestream commerce requirements appear.
+- Development should be document-driven: product behavior, backend contracts, frontend states, and acceptance criteria must be captured in this document or `docs/livecrew-backend-design.md` before implementation.
 
 ## 3. Core Users
 
@@ -153,7 +158,151 @@ Requirements:
 - Agent outputs should include confidence, reason, and evidence.
 - The host UI should expose enough timeline detail to debug a wrong action during the demo.
 
+### NFR-8: OpenAI Integration Boundary
+
+OpenAI integration is now part of the target product experience, but it must sit behind deterministic contracts and guardrails.
+
+Requirements:
+
+- Host audio should be sent to the OpenAI API for realtime transcription.
+- Transcript events should be normalized before they enter the CoHostAgent workflow.
+- CoHostAgent should call the OpenAI API to classify host intent and produce structured `ProposedAction` objects.
+- ConciergeAgent should call the OpenAI API to classify viewer messages and draft grounded replies.
+- ProducerAgent should call the OpenAI API to generate a narrative post-stream report from ledger and commerce facts.
+- LLM responses must not directly mutate commerce state.
+- LLM responses must pass deterministic validation for SKU grounding, order quantity, price, stock, unsupported claims, and host-confirmation requirements.
+- If OpenAI is unavailable, times out, or returns invalid structured output, the system should fall back to deterministic behavior or ask for host confirmation instead of executing a risky action.
+- OpenAI prompts, model choices, and response schemas should be centralized so agents do not drift into incompatible formats.
+
+### NFR-9: API Key and Runtime Configuration
+
+OpenAI credentials are provided by the developer through local environment files.
+
+Requirements:
+
+- The app should read the API key from `.env`.
+- The expected variable name is `OPENAI_API_KEY`.
+- Optional model or realtime settings may be provided through additional environment variables, but safe defaults should exist for the demo.
+- API keys must never be hardcoded in source files, committed to git, sent to the browser, or displayed in UI logs.
+- OpenAI calls should run only on the server side.
+- Missing or invalid API key state should be surfaced as an operational setup issue, not as a broken blank screen.
+
+### NFR-10: Document-Driven Development
+
+All implementation work should follow the project documents as the source of truth.
+
+Requirements:
+
+- New product behavior must first be added to `docs/livecrew-feature-requirements.md` with expected behavior and acceptance criteria.
+- Backend architecture, routes, models, graph flow, and module ownership must be added to `docs/livecrew-backend-design.md` before backend implementation.
+- Frontend work should reference documented states, actions, and API contracts instead of inventing local-only behavior.
+- If implementation discovers a better or safer approach, update the documents first, then adjust code.
+- Pulling behavior directly into code without matching documentation is out of process unless it is a small bug fix with no product or API impact.
+- Completed features should be traceable from requirement to backend contract to frontend UI state to verification check.
+
 ## 5. Initial Functional Requirements
+
+### FR-0: Realtime Host Speech Transcription
+
+The host should be able to speak naturally during the livestream. The system should use the OpenAI API to transcribe host speech in real time and feed transcript events into the CoHostAgent.
+
+Examples:
+
+```text
+Host speaks: "Let's show the tumbler now."
+-> OpenAI realtime transcription emits: "Let's show the tumbler now."
+-> CoHostAgent receives the transcript event.
+```
+
+Expected behavior:
+
+- The host cockpit should provide a microphone-driven transcription flow for the demo.
+- Host audio should be streamed or chunked to the OpenAI API for low-latency transcription.
+- Partial transcript text may be shown in the host cockpit, but only finalized transcript segments should trigger commerce actions.
+- Each finalized transcript segment should become a normalized `host_transcript` event.
+- Transcript events should include timestamp, source, text, and processing status.
+- Transcription errors should be visible to the host and should not trigger agent actions.
+- The event ledger should record finalized transcript events that lead to proposed or applied actions.
+
+Acceptance criteria:
+
+- With `OPENAI_API_KEY` configured, host speech can produce visible transcript text in the host cockpit.
+- A finalized transcript segment can trigger CoHostAgent intent recognition.
+- If transcription fails, no commerce state is mutated.
+- The host can still use typed demo transcript input as a fallback for hackathon reliability.
+
+### FR-0A: Text Command Debug Input for CoHostAgent
+
+For debugging and demo control, the host cockpit should support typed text commands that are sent to the same CoHostAgent workflow as finalized speech transcripts.
+
+Examples:
+
+```text
+Host types: "Switch to the sleep mask."
+-> CoHostAgent receives a `host_text_command` event.
+-> CoHostAgent proposes `set_active_sku` for Satin Cloud Sleep Mask.
+```
+
+Expected behavior:
+
+- The host cockpit should include a text command input dedicated to CoHostAgent debugging.
+- Submitted text commands should use the same intent recognition, structured action schema, guardrails, host-confirmation flow, commerce executor, and ledger path as speech transcripts.
+- Text commands should be clearly labeled as typed/debug input in transcript history and ledger evidence.
+- Text commands should not bypass safety checks, SKU grounding, price validation, or host confirmation.
+- The host should be able to submit text commands even when microphone permission, OpenAI realtime transcription, or camera capture is unavailable.
+
+Acceptance criteria:
+
+- A typed command can trigger the same product listing, price, promotion, and override proposals as a spoken transcript.
+- The UI shows whether an action came from speech transcription or typed debug input.
+- The ledger records the typed command source text and resulting proposed or applied action.
+- Invalid or ambiguous typed commands are escalated or rejected using the same rules as speech commands.
+
+### FR-0B: Host Camera and Microphone Livestream to Viewer
+
+The host cockpit should access the host's Mac camera and microphone through the browser and stream live audio/video to the viewer room for the demo.
+
+Expected behavior:
+
+- The host page should request browser permission for camera and microphone access.
+- The host should be able to start and stop the live camera/microphone stream.
+- The host page should show a local preview so the host can verify camera framing and microphone state.
+- The viewer page should show the host's live video and audio with low latency.
+- Host audio should be available both for viewer playback and for OpenAI realtime transcription.
+- If the camera is unavailable, the viewer page should degrade to audio-only or a clear placeholder.
+- If the microphone is unavailable, the viewer page should show video-only and transcription should not trigger agent actions.
+- Browser permission errors should be visible in the host cockpit.
+- The demo should not record or persist raw audio/video unless a later requirement explicitly asks for recording.
+
+Acceptance criteria:
+
+- On a Mac with browser camera and microphone permission granted, `/host` can capture local media and `/viewer` can play the live host stream.
+- The host can stop the stream and the viewer room reflects that the stream is offline.
+- Media permission failure does not break product shelf, chat, agent queue, or commerce state.
+- The implementation uses browser-native media capture and a lightweight realtime transport suitable for the hackathon demo.
+
+### FR-0C: Mobile Viewer Room Layout
+
+The viewer room should look and behave like a mobile livestream commerce app instead of an operator dashboard.
+
+Expected behavior:
+
+- `/viewer` should render as a phone-sized customer room, centered on desktop and filling the available viewport on mobile.
+- The upper two-thirds of the phone room should be the livestream area.
+- The lower one-third of the phone room should be the chat area.
+- The livestream area should show host video when available, and a clear offline or connecting state when unavailable.
+- When CoHostAgent or host actions set the active SKU, the livestream area should show the active product details.
+- Active product details should include product name, price, stock, and a short grounded description from SKU facts.
+- Product information should come from backend active SKU state, with local demo state only as a fallback.
+- The product overlay must not hide the chat input or make the video controls unusable.
+- Viewer chat should stay readable and scrollable within the lower third of the phone layout.
+
+Acceptance criteria:
+
+- `/viewer` visually reads as a mobile livestream room on desktop and mobile.
+- The livestream section occupies roughly two-thirds of the phone frame and the chat section roughly one-third.
+- Changing the active SKU from `/host` updates the product information shown over the livestream area.
+- The chat panel remains usable without overlapping the product overlay.
 
 ### FR-1: Detect Product Mentions and List SKU
 
@@ -171,6 +320,8 @@ Examples:
 
 Expected behavior:
 
+- CoHostAgent receives finalized transcript events from OpenAI realtime transcription or typed fallback input.
+- CoHostAgent uses the OpenAI API to classify host intent and propose SKU listing or switching actions.
 - The backend resolves product mentions against the seeded SKU catalogue.
 - Explicit product mentions should take priority over the current active SKU.
 - Alias matching should support natural names, partial names, and common product references.
@@ -181,7 +332,8 @@ Expected behavior:
 
 Acceptance criteria:
 
-- Given a host transcript that clearly mentions one seeded SKU, the backend returns a proposed `set_active_sku` action.
+- Given a host transcript that clearly mentions one seeded SKU, CoHostAgent returns a proposed `set_active_sku` action using the shared structured action schema.
+- The proposed action includes source transcript text, confidence, reason, and evidence.
 - After approval, backend `active_sku_id` changes to the resolved SKU.
 - The frontend product shelf updates without a page refresh.
 - The ledger records the SKU switch with source text and selected SKU.
@@ -233,7 +385,7 @@ Examples:
 
 Expected behavior:
 
-- The backend extracts price or discount intent from host transcript.
+- CoHostAgent uses the OpenAI API to extract price or discount intent from host transcript.
 - Explicit SKU mentions should determine which SKU is affected.
 - If no SKU is explicitly mentioned, contextual phrases like "this one" should apply to the active SKU.
 - Price changes should update backend SKU state, not just frontend display text.
@@ -269,7 +421,7 @@ Examples:
 
 Expected behavior:
 
-- The backend extracts SKU, promotional price, duration, and stock limit.
+- CoHostAgent uses the OpenAI API to extract SKU, promotional price, duration, and stock limit.
 - If no SKU is mentioned, the promotion applies to the active SKU.
 - The backend validates that the promotional price and quantity limit are allowed.
 - The frontend should show the active flash-sale state, including price, remaining quantity, and expiry.
@@ -306,7 +458,7 @@ Examples:
 
 Expected behavior:
 
-- The ConciergeAgent classifies viewer intent.
+- The ConciergeAgent uses the OpenAI API to classify viewer intent and draft a response.
 - Product questions should resolve SKU by explicit mention first, then active SKU.
 - Answers must use SKU facts and current backend state such as price, stock, and active flash sale.
 - The agent may answer routine grounded questions without host approval.
@@ -316,7 +468,7 @@ Expected behavior:
 
 Acceptance criteria:
 
-- Product fact questions produce `suggest_reply` actions with grounded evidence.
+- Product fact questions produce `suggest_reply` actions with grounded evidence and structured LLM output.
 - Unsupported discount requests are blocked or escalated.
 - Ambiguous questions ask for clarification or host confirmation.
 - Host confirmations are visible in the agent queue and are stored in backend state, not only in local UI state.
@@ -342,6 +494,7 @@ Expected report contents:
 Expected behavior:
 
 - The ProducerAgent reads ledger, orders, SKU state, and flash-sale history.
+- The ProducerAgent uses the OpenAI API to draft the narrative sections of the report.
 - The report must cite backend numbers exactly.
 - The report must not infer listed SKUs from the latest active SKU.
 - The report should distinguish factual metrics from narrative recommendations.
@@ -349,7 +502,8 @@ Expected behavior:
 
 Acceptance criteria:
 
-- A report can be generated after a demo stream without OpenAI dependency.
+- A report can be generated after a demo stream using OpenAI for narrative generation when the API key is configured.
+- If OpenAI is unavailable, a deterministic report fallback should still show backend metrics for demo continuity.
 - Metrics match backend orders and ledger entries.
 - Listed SKUs are derived from SKU listing and flash-sale events.
 - Risk events include blocked replies, unsupported claims, and host confirmations.
@@ -361,6 +515,7 @@ Acceptance criteria:
 
 Handles host-facing live operations:
 
+- OpenAI realtime transcript consumption.
 - SKU mention detection.
 - Active SKU switching.
 - Spoken price changes.
@@ -369,6 +524,8 @@ Handles host-facing live operations:
 - Host override interpretation.
 
 CoHostAgent outputs proposed actions only. It does not mutate backend commerce state.
+
+CoHostAgent should use OpenAI structured output for intent recognition, then pass proposed actions through deterministic SKU resolution and guardrails.
 
 ### ConciergeAgent
 
@@ -383,6 +540,8 @@ Handles viewer-facing service:
 
 ConciergeAgent outputs proposed replies and order actions only. It does not finalize commerce state.
 
+ConciergeAgent should use OpenAI structured output for intent classification and reply drafting, then pass replies through grounding and commerce guardrails.
+
 ### ProducerAgent
 
 Handles post-stream review:
@@ -393,6 +552,8 @@ Handles post-stream review:
 - Summarizes risks, learnings, and next recommendations.
 
 ProducerAgent is read-only and does not participate in live commerce mutation.
+
+ProducerAgent may use OpenAI to draft narrative analysis, but all numeric metrics and listed SKUs must come from backend state and ledger records.
 
 ## 7. Cross-Cutting Extension Workflow
 
@@ -406,7 +567,8 @@ When a new requirement is introduced, use this workflow:
 6. Add ledger event payload fields.
 7. Add frontend display or controls.
 8. Add deterministic evaluation cases.
-9. Verify the original demo path still works.
+9. Add or update OpenAI prompt and structured-output schema coverage when the capability needs LLM understanding.
+10. Verify the original demo path still works.
 
 The expected result is that new functionality plugs into the framework instead of bypassing it.
 
@@ -414,8 +576,15 @@ The expected result is that new functionality plugs into the framework instead o
 
 The frontend should include:
 
+- Host microphone/transcription controls for the OpenAI realtime transcription flow.
+- Host text command input for CoHostAgent debugging.
+- Host camera and microphone permission controls.
+- Host local video preview with live/offline/muted states.
 - Host cockpit showing transcript, active SKU, price, stock, flash sale, agent queue, and ledger.
-- Viewer room showing active SKU, price, stock, flash sale, and chat.
+- Viewer room styled as a mobile livestream commerce room.
+- Viewer livestream area occupying the top two-thirds of the mobile room.
+- Viewer chat area occupying the bottom one-third of the mobile room.
+- Viewer product overlay showing active SKU name, price, stock, and short grounded facts during the livestream.
 - Product shelf that reacts to backend active SKU changes.
 - Flash-sale panel showing promotional price, time remaining, and remaining sale quantity.
 - Suggested reply panel for grounded answers and escalations.
@@ -423,10 +592,14 @@ The frontend should include:
 
 Frontend state should come from backend state once backend integration is enabled.
 
+Host media capture should use browser permissions and should not require installing a native Mac app.
+
 ## 9. Backend Requirements
 
 The backend should provide:
 
+- Python FastAPI service under `backend/` as the backend runtime.
+- LangGraph workflow as the required orchestration layer for CoHostAgent, ConciergeAgent, ProducerAgent, guardrails, confirmation, and commerce application.
 - SKU catalogue and alias resolution.
 - Active SKU state.
 - Current SKU price and stock.
@@ -439,6 +612,13 @@ The backend should provide:
 - Commerce service as the only state writer.
 - Realtime update stream for host and viewer surfaces.
 - Report generation endpoint.
+- Server-side OpenAI client configuration using `OPENAI_API_KEY` from `.env`.
+- Realtime transcription endpoint or bridge for host speech.
+- Structured LLM action generation for CoHostAgent, ConciergeAgent, and ProducerAgent.
+- Host text command endpoint that normalizes typed debug commands into the CoHostAgent workflow.
+- Lightweight signaling or session coordination for host-to-viewer browser media streaming.
+
+The Next.js app should not implement core backend behavior directly. It may render UI, capture browser media, call the Python backend, subscribe to backend realtime updates, and proxy requests only when that proxy does not become the source of truth.
 
 ## 10. Out of Scope for MVP
 
@@ -446,7 +626,8 @@ The backend should provide:
 - Real marketplace API integration.
 - Production database.
 - Multi-room livestream infrastructure.
-- RTMP/video streaming pipeline.
+- Production RTMP/video streaming pipeline.
+- Media recording, replay, clipping, or cloud storage.
 - Vector database retrieval.
 - Fully autonomous price changes without guardrails.
 
@@ -455,12 +636,16 @@ The backend should provide:
 The demo is successful when the following path works end to end:
 
 1. Host mentions a product.
-2. Backend resolves the SKU.
-3. Frontend lists or highlights the SKU.
-4. Host switches SKU during the stream.
-5. Host changes price or creates a limited promotion through speech.
-6. Viewer asks a product question.
-7. Agent answers using grounded facts and current backend state.
-8. Agent blocks unsupported promotion or unsafe claim.
-9. Backend records state changes and ledger events.
-10. ProducerAgent generates a factual post-stream review.
+2. OpenAI realtime transcription produces a finalized host transcript segment.
+3. CoHostAgent uses OpenAI structured output to propose the intended action.
+4. Backend validates the proposed SKU and guardrails.
+5. Frontend lists or highlights the SKU.
+6. Host can submit the same operation as a typed debug command when speech input is inconvenient.
+7. Viewer sees and hears the host's live camera/microphone stream.
+8. Host switches SKU during the stream.
+9. Host changes price or creates a limited promotion through speech or typed debug command.
+10. Viewer asks a product question.
+11. ConciergeAgent uses OpenAI to draft a grounded answer from product and commerce facts.
+12. Agent blocks unsupported promotion or unsafe claim.
+13. Backend records state changes and ledger events.
+14. ProducerAgent generates a factual post-stream review using backend numbers and OpenAI narrative drafting.
