@@ -342,6 +342,10 @@ def viewer_word_cloud(request: ViewerInsightRequest):
                 "window_seconds": request.window_seconds,
                 "comment_count": snapshot.comment_count,
                 "terms": [term.model_dump(mode="json") for term in snapshot.terms],
+                "intent_breakdown": [
+                    metric.model_dump(mode="json")
+                    for metric in snapshot.intent_breakdown
+                ],
             },
         ),
         *state.ledger,

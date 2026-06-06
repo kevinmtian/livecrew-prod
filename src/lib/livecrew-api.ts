@@ -88,6 +88,12 @@ export type WordCloudTerm = {
   count: number;
 };
 
+export type ViewerInsightMetric = {
+  label: string;
+  count: number;
+  weight: number;
+};
+
 export type ViewerInsightSnapshot = {
   id: string;
   window_started_at: string;
@@ -95,6 +101,7 @@ export type ViewerInsightSnapshot = {
   active_sku_id: string | null;
   comment_count: number;
   terms: WordCloudTerm[];
+  intent_breakdown: ViewerInsightMetric[];
   summary: string;
   suggested_replies: string[];
   source_comment_ids: string[];

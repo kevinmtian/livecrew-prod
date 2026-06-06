@@ -1368,6 +1368,23 @@ export default function HostPage() {
                 <p className="text-sm leading-6 text-slate-700">
                   {activeInsight.summary}
                 </p>
+                {(activeInsight.intent_breakdown ?? []).length > 0 ? (
+                  <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    {(activeInsight.intent_breakdown ?? []).map((metric) => (
+                      <div
+                        className="rounded-md border border-slate-200 bg-white px-3 py-2"
+                        key={`${activeInsight.id}-${metric.label}`}
+                      >
+                        <p className="truncate text-xs font-medium text-slate-500">
+                          {metric.label}
+                        </p>
+                        <p className="mt-1 text-lg font-semibold text-slate-900">
+                          {metric.count}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   {activeInsight.terms.length > 0 ? (
                     activeInsight.terms.map((term) => (

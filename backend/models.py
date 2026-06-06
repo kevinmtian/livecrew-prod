@@ -142,6 +142,12 @@ class WordCloudTerm(BaseModel):
     count: int = Field(ge=1)
 
 
+class ViewerInsightMetric(BaseModel):
+    label: str
+    count: int = Field(ge=1)
+    weight: int = Field(ge=1, le=10)
+
+
 class ViewerInsightSnapshot(BaseModel):
     id: str = Field(default_factory=lambda: create_id("insight"))
     window_started_at: datetime
@@ -149,6 +155,7 @@ class ViewerInsightSnapshot(BaseModel):
     active_sku_id: str | None = None
     comment_count: int
     terms: list[WordCloudTerm] = Field(default_factory=list)
+    intent_breakdown: list[ViewerInsightMetric] = Field(default_factory=list)
     summary: str
     suggested_replies: list[str] = Field(default_factory=list)
     source_comment_ids: list[str] = Field(default_factory=list)

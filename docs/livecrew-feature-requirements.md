@@ -563,7 +563,7 @@ Expected behavior:
 - The host cockpit should show recent backend viewer comments, per-message AI draft replies, and controls to use a draft reply or ignore it.
 - Once per minute, the host cockpit should call the backend to summarize comments from the previous three minutes.
 - The word cloud should group repeated viewer language and product-specific themes into weighted terms.
-- The word cloud snapshot should include source comment count, time window, active SKU context, short summary, and suggested host talking points or replies.
+- The word cloud snapshot should include source comment count, time window, active SKU context, weighted intent breakdown, short summary, and suggested host talking points or replies.
 - If OpenAI is unavailable, the backend should generate a deterministic fallback word cloud from comment terms and SKU aliases.
 - Reset should clear stored viewer comments and word cloud snapshots.
 
@@ -573,6 +573,7 @@ Acceptance criteria:
 - Product questions produce grounded `suggest_reply` actions and suggested reply text tied to the active or explicitly mentioned SKU.
 - A host can click a suggested reply from the monitoring panel and send it through the existing host reply flow.
 - The host cockpit refreshes the three-minute word cloud every minute and also provides a manual refresh for demo testing.
+- The host cockpit shows a compact intent breakdown so the host can quickly tell whether viewers are asking product questions, checking promos, ordering, or raising risk-sensitive topics.
 - The word cloud never exposes the OpenAI API key and does not call OpenAI from the browser.
 - Unsupported claims or discount requests do not produce invented commercial promises.
 

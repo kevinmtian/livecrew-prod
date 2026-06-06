@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 from backend.models import (
     CommerceState,
     ViewerComment,
+    ViewerInsightMetric,
     ViewerInsightSnapshot,
     WordCloudTerm,
     utc_now,
@@ -83,6 +84,22 @@ INTENT_TERMS = {
     "safe": 2,
     "allergy": 2,
 }
+INTENT_LABELS = {
+    "create_order": "Orders",
+    "suggest_reply": "Product questions",
+    "product_facts": "Product facts",
+    "promo_request": "Promo requests",
+    "order": "Orders",
+    "skin_safety": "Safety questions",
+    "comparison": "Comparisons",
+    "product_clarification": "Clarifications",
+    "ambiguous": "Needs context",
+    "malicious": "Risk checks",
+    "off_topic": "Off topic",
+    "blocked": "Blocked risks",
+    "needs_host": "Needs host",
+    "none": "General chat",
+}
 
 
 def _format_price(price_cents: int) -> str:
@@ -142,6 +159,32 @@ def _deterministic_terms(
         weight = max(1, min(10, round((count / max_count) * 10)))
         terms.append(WordCloudTerm(text=text, count=count, weight=weight))
     return terms
+
+
+def _comment_intent_label(comment: ViewerComment) -> str:
+    if comment.reply_status == "blocked":
+        return INTENT_LABELS["blocked"]
+    if comment.reply_status == "needs_host":
+        return INTENT_LABELS["needs_host"]
+    if comment.intent:
+        return INTENT_LABELS.get(comment.intent, comment.intent.replace("_", " ").title())
+    return INTENT_LABELS["none"]
+
+
+def _intent_breakdown(comments: list[ViewerComment]) -> list[ViewerInsightMetric]:
+    counter = Counter(_comment_intent_label(comment) for comment in comments)
+    if not counter:
+        return []
+
+    max_count = max(counter.values())
+    return [
+        ViewerInsightMetric(
+            label=label,
+            count=count,
+            weight=max(1, min(10, round((count / max_count) * 10))),
+        )
+        for label, count in counter.most_common(8)
+    ]
 
 
 def _deterministic_summary(
@@ -251,6 +294,7 @@ def generate_viewer_word_cloud(
     else:
         terms = _deterministic_terms(comments, state)
         summary, suggested_replies = _deterministic_summary(comments, state, terms)
+    intent_breakdown = _intent_breakdown(comments)
 
     return ViewerInsightSnapshot(
         window_started_at=started_at,
@@ -258,6 +302,7 @@ def generate_viewer_word_cloud(
         active_sku_id=state.active_sku_id,
         comment_count=len(comments),
         terms=terms,
+        intent_breakdown=intent_breakdown,
         summary=summary,
         suggested_replies=suggested_replies,
         source_comment_ids=[comment.id for comment in comments],

@@ -258,7 +258,7 @@ Important rules:
 - SKU stock and prices are backend source of truth.
 - Viewer sessions store active username-only logins for the current demo run.
 - Viewer comments are backend source of truth for ConciergeAgent replies and host word-cloud analysis.
-- Viewer insight snapshots summarize recent viewer demand for the host cockpit.
+- Viewer insight snapshots summarize recent viewer demand for the host cockpit, including deterministic intent counts derived from stored viewer comments.
 - Checkout intents represent viewers who opened a purchase confirmation modal but have not confirmed or cancelled.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
@@ -794,6 +794,11 @@ Request:
 Response:
 
 ```python
+class ViewerInsightMetric(BaseModel):
+    label: str
+    count: int
+    weight: int
+
 class ViewerInsightSnapshot(BaseModel):
     id: str
     window_started_at: datetime
@@ -801,6 +806,7 @@ class ViewerInsightSnapshot(BaseModel):
     active_sku_id: str | None
     comment_count: int
     terms: list[WordCloudTerm]
+    intent_breakdown: list[ViewerInsightMetric]
     summary: str
     suggested_replies: list[str]
     source_comment_ids: list[str]
@@ -811,6 +817,7 @@ Rules:
 
 - Default window is 180 seconds.
 - Terms are sorted by descending weight.
+- Intent breakdown is computed deterministically from recorded viewer comment intent and guardrail status.
 - OpenAI may cluster terms and draft summary text, but the backend validates the returned term shape and falls back to deterministic extraction if needed.
 - The snapshot is stored in `CommerceState.viewer_insights` and a `viewer_word_cloud_generated` ledger entry is appended.
 
