@@ -258,6 +258,7 @@ Important rules:
 - Viewer sessions store active username-only logins for the current demo run.
 - Viewer comments are backend source of truth for ConciergeAgent replies and host word-cloud analysis.
 - Viewer insight snapshots summarize recent viewer demand for the host cockpit, including deterministic intent counts derived from stored viewer comments.
+- Viewer insight generation filters out host, system, and LiveCrew Agent sender names before building terms, intent counts, OpenAI prompts, summaries, or source comment ids.
 - Orders use the backend price at order creation time.
 - Flash sale applies only while active and within its time and stock limits.
 - Pending actions represent proposals waiting for host approval and must not change commerce state.
@@ -878,6 +879,7 @@ class ViewerInsightSnapshot(BaseModel):
 Rules:
 
 - Default window is 180 seconds.
+- Only viewer-authored comment text is analyzed; host replies, LiveCrew Agent replies, suggested reply text, and other automated response text are excluded.
 - Terms are sorted by descending weight.
 - Intent breakdown is computed deterministically from recorded viewer comment intent and guardrail status.
 - OpenAI may cluster terms and draft summary text, but the backend validates the returned term shape and falls back to deterministic extraction if needed.

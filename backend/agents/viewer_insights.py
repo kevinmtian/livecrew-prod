@@ -100,10 +100,25 @@ INTENT_LABELS = {
     "needs_host": "Needs host",
     "none": "General chat",
 }
+NON_VIEWER_SENDER_NAMES = {
+    "agent",
+    "ai",
+    "co-host",
+    "cohost",
+    "concierge",
+    "host",
+    "livecrew",
+    "livecrew agent",
+    "system",
+}
 
 
 def _format_price(price_cents: int) -> str:
     return f"${price_cents / 100:.2f}"
+
+
+def _is_viewer_authored_comment(comment: ViewerComment) -> bool:
+    return comment.viewer.strip().casefold() not in NON_VIEWER_SENDER_NAMES
 
 
 def _recent_comments(
@@ -116,6 +131,7 @@ def _recent_comments(
         comment
         for comment in state.viewer_comments
         if comment.created_at >= started_at and comment.created_at <= ended_at
+        and _is_viewer_authored_comment(comment)
     ]
     comments.sort(key=lambda comment: comment.created_at)
     return comments, started_at, ended_at

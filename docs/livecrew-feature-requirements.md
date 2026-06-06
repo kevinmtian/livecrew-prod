@@ -571,6 +571,7 @@ Expected behavior:
 - The host cockpit should show recent backend viewer comments as a compact queue with at most three visible items, per-message AI draft replies, and controls to use a draft reply or ignore it.
 - The host cockpit should not render a separate raw Viewer Chat panel when Viewer AI Monitor already covers the actionable host-side comment queue.
 - Once per minute, the host cockpit should call the backend to summarize comments from the previous three minutes.
+- The word cloud analysis should include only viewer-authored messages and must not analyze host replies, LiveCrew Agent replies, or other automated reply text.
 - The word cloud should group repeated viewer language and product-specific themes into weighted terms.
 - The word cloud snapshot should include source comment count, time window, active SKU context, weighted intent breakdown, short summary, and suggested host talking points or replies.
 - If OpenAI is unavailable, the backend should generate a deterministic fallback word cloud from comment terms and SKU aliases.
@@ -585,6 +586,7 @@ Acceptance criteria:
 - The host cockpit shows a compact intent breakdown so the host can quickly tell whether viewers are asking product questions, checking promos, ordering, or raising risk-sensitive topics.
 - The Viewer AI Monitor queue shows only the three newest backend viewer comments to avoid crowding the host cockpit.
 - The host cockpit does not duplicate the same viewer messages in a separate Viewer Chat panel.
+- Host replies and LiveCrew Agent auto replies do not affect word cloud terms, intent breakdown, comment count, or source comment ids.
 - The word cloud never exposes the OpenAI API key and does not call OpenAI from the browser.
 - Unsupported claims or discount requests do not produce invented commercial promises.
 
