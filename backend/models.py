@@ -175,6 +175,13 @@ class TranscriptionResponse(BaseModel):
     source: Literal["openai", "unavailable"]
 
 
+class RealtimeTranscriptionTokenResponse(BaseModel):
+    value: str
+    expires_at: int | None = None
+    session_id: str | None = None
+    model: str
+
+
 class MediaSession(BaseModel):
     session_id: str
     status: Literal["waiting", "offer_ready", "answer_ready", "live", "stopped"] = "waiting"

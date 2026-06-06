@@ -619,6 +619,7 @@ GET  /events/stream
 POST /events/host-transcript
 POST /events/host-command
 POST /events/viewer-message
+POST /events/realtime-transcription-token
 
 POST /commerce/flash-sale
 POST /commerce/announcement
@@ -650,6 +651,35 @@ Request:
   "text": "Switch to the tumbler, make it 22, and first 20 orders get 18.8 for five minutes."
 }
 ```
+
+### `POST /events/realtime-transcription-token`
+
+Creates a short-lived OpenAI Realtime client secret for browser microphone transcription.
+This endpoint is the only browser-facing OpenAI credential path. It uses the server-side
+`OPENAI_API_KEY` and returns only the ephemeral client secret value and metadata needed
+to initialize a WebRTC transcription session.
+
+Request: empty JSON body or no body.
+
+Response:
+
+```json
+{
+  "value": "ek_...",
+  "expires_at": 1767225600,
+  "session_id": "sess_...",
+  "model": "gpt-4o-transcribe"
+}
+```
+
+Backend behavior:
+
+- Use a Realtime transcription session with `type: "transcription"`.
+- Default the transcription model to `gpt-4o-transcribe`, configurable by `OPENAI_REALTIME_TRANSCRIPTION_MODEL`.
+- Use server VAD for turn boundaries so only completed speech turns are sent to `POST /events/host-transcript`.
+- Include SKU names and aliases as transcription vocabulary guidance when the selected model supports prompt guidance.
+- Return a clear `503` error when `OPENAI_API_KEY` is missing or the OpenAI client-secret request fails.
+- Never write the ephemeral client secret to the ledger.
 
 Response:
 
