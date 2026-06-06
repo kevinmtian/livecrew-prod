@@ -98,6 +98,18 @@ function getActiveStockInputValue(state: BackendState) {
   return sku ? String(sku.stock) : "";
 }
 
+function splitTopChatIntents(value: string | undefined) {
+  if (!value || value === "none") {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((intent) => intent.trim())
+    .filter(Boolean)
+    .slice(0, 3);
+}
+
 function ledgerFromWorkflow(response: WorkflowResponse): LedgerEvent[] {
   return response.ledger_entries
     .filter((entry) => entry.type !== "noop")
@@ -830,7 +842,7 @@ export default function HostPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_0.85fr_0.85fr] xl:items-stretch">
+      <div className="grid gap-4 xl:grid-cols-[1fr_0.82fr_1.05fr_0.75fr] xl:items-stretch">
         <Panel
           title="Live Stream"
           eyebrow="Camera and microphone"
@@ -1104,7 +1116,18 @@ export default function HostPage() {
           eyebrow="Room messages"
           className="xl:col-start-2 xl:row-start-3"
         >
-            <div className="space-y-3">
+            {roomState.monitorSignal?.signals.question_backlog &&
+            roomState.monitorSignal.signals.question_backlog !== "none" ? (
+              <div className="mb-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                  Frequently asked
+                </p>
+                <p className="mt-1 text-sm font-semibold leading-5 text-slate-950">
+                  {roomState.monitorSignal.signals.question_backlog}
+                </p>
+              </div>
+            ) : null}
+            <div className="max-h-72 space-y-3 overflow-y-auto pr-1">
               {mockChat.map((chat) => (
                 <div
                   className="rounded-md border border-slate-200 bg-slate-50 p-3"
@@ -1132,7 +1155,7 @@ export default function HostPage() {
             </div>
         </Panel>
 
-        <div className="grid gap-4 xl:col-start-3 xl:col-span-2 xl:row-span-2 xl:min-h-0 xl:grid-cols-2">
+        <div className="grid gap-4 xl:col-start-3 xl:col-span-2 xl:row-span-2 xl:min-h-0 xl:grid-cols-[1.35fr_0.9fr]">
           <Panel
             title="Monitor Agent"
             eyebrow="Scene judgment"
@@ -1141,14 +1164,39 @@ export default function HostPage() {
           >
             {roomState.monitorSignal ? (
               <div className="w-full rounded-md border border-rose-100 bg-rose-50 p-4">
+                <div className="mb-3 rounded-md border border-white/80 bg-white/80 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Top chat intents
+                  </p>
+                  <div className="mt-2 grid gap-2">
+                    {splitTopChatIntents(
+                      roomState.monitorSignal.signals.top_chat_intents ??
+                        roomState.monitorSignal.signals.top_chat_intent,
+                    ).map((intent) => (
+                      <div
+                        className="rounded-md bg-slate-50 px-3 py-2 text-sm font-semibold leading-5 text-slate-950"
+                        key={intent}
+                      >
+                        {intent}
+                      </div>
+                    ))}
+                    {splitTopChatIntents(
+                      roomState.monitorSignal.signals.top_chat_intents ??
+                        roomState.monitorSignal.signals.top_chat_intent,
+                    ).length === 0 ? (
+                      <p className="text-sm font-semibold text-slate-950">-</p>
+                    ) : null}
+                  </div>
+                </div>
                 <div className="mb-4 grid grid-cols-2 gap-2">
                   {[
-                    ["在线人数", roomState.monitorSignal.signals.online_viewers],
+                    ["Viewers", roomState.monitorSignal.signals.online_viewers],
                     ["GPM", roomState.monitorSignal.signals.gpm],
-                    ["转化率", roomState.monitorSignal.signals.conversion_rate],
-                    ["弹幕情绪", roomState.monitorSignal.signals.comment_sentiment],
-                    ["互动率", roomState.monitorSignal.signals.interaction_rate],
-                    ["来源", roomState.monitorSignal.signals.analysis_source],
+                    ["Conversion", roomState.monitorSignal.signals.conversion_rate],
+                    ["High intent", roomState.monitorSignal.signals.high_intent_density],
+                    ["Backlog", roomState.monitorSignal.signals.question_backlog],
+                    ["Interaction", roomState.monitorSignal.signals.interaction_rate],
+                    ["Source", roomState.monitorSignal.signals.analysis_source],
                   ].map(([label, value]) => (
                     <div
                       className="min-h-16 rounded-md border border-white/70 bg-white/70 p-2"
@@ -1182,9 +1230,24 @@ export default function HostPage() {
                     {roomState.monitorSignal.urgency}
                   </StatusPill>
                 </div>
-                <p className="mt-4 rounded-md bg-white p-3 text-sm leading-6 text-slate-950">
-                  {roomState.monitorSignal.script}
-                </p>
+                {roomState.monitorSignal.hostCue ? (
+                  <div className="mt-4 rounded-md border border-amber-100 bg-amber-50 p-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">
+                      Host Cue
+                    </p>
+                    <p className="mt-2 text-xs leading-5 text-slate-800">
+                      {roomState.monitorSignal.hostCue}
+                    </p>
+                  </div>
+                ) : null}
+                <div className="mt-3 rounded-md bg-white p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                    Suggested Line
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-slate-950">
+                    {roomState.monitorSignal.script}
+                  </p>
+                </div>
                 <p className="mt-3 text-xs leading-5 text-slate-600">
                   {roomState.monitorSignal.scenarioReason}
                 </p>

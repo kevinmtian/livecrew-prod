@@ -117,6 +117,10 @@ export type MonitorSignalPayload = {
   conversion_rate_delta: number;
   comment_sentiment: number;
   interaction_rate: number;
+  intent_distribution: Record<string, number>;
+  high_intent_density: number;
+  top_question: string | null;
+  top_question_count: number;
 };
 
 export type MonitorResponse = {
@@ -130,6 +134,7 @@ export type MonitorResponse = {
   hook: {
     id: "suspense" | "order_push" | "benefit" | "interaction";
     label: string;
+    host_cue: string | null;
     script: string;
   };
   signals: Record<string, string>;
@@ -265,6 +270,28 @@ export function sendMonitorSignal(payload: MonitorSignalPayload) {
   return requestJson<MonitorResponse>("/events/monitor-signal", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+export function fetchLiveMetrics() {
+  return requestJson<MonitorSignalPayload>("/metrics/live");
+}
+
+export function sendViewerHeartbeat(sessionId: string) {
+  return requestJson<MonitorSignalPayload>("/metrics/viewer-heartbeat", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+}
+
+export function sendViewerMetricEvent(
+  sessionId: string,
+  eventType: "message" | "like" | "order",
+  text?: string,
+) {
+  return requestJson<MonitorSignalPayload>("/metrics/viewer-event", {
+    method: "POST",
+    body: JSON.stringify({ session_id: sessionId, event_type: eventType, text }),
   });
 }
 

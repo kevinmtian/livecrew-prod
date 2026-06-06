@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
 import {
+  fetchLiveMetrics,
   sendMonitorSignal,
   type MonitorResponse,
   type MonitorSignalPayload,
@@ -11,60 +12,94 @@ import { setMonitorSignal } from "@/lib/local-room";
 
 const scenarios: Array<{
   label: string;
-  payload: MonitorSignalPayload;
+  payload: Omit<MonitorSignalPayload, "online_viewers" | "online_viewers_delta">;
 }> = [
   {
     label: "憋单场景",
     payload: {
-      online_viewers: 2341,
-      online_viewers_delta: 18.2,
       gpm_cents: 31200,
       gpm_delta: -12.4,
       conversion_rate: 0.7,
       conversion_rate_delta: -0.4,
       comment_sentiment: 0.81,
       interaction_rate: 1.2,
+      intent_distribution: { ask_link: 8, ask_price: 5, purchase_intent: 4 },
+      high_intent_density: 11,
+      top_question: "where to buy",
+      top_question_count: 6,
     },
   },
   {
     label: "爆款冲刺",
     payload: {
-      online_viewers: 1980,
-      online_viewers_delta: 6.4,
       gpm_cents: 52800,
       gpm_delta: 26.8,
       conversion_rate: 2.8,
       conversion_rate_delta: 0.9,
       comment_sentiment: 0.76,
       interaction_rate: 4.8,
+      intent_distribution: { purchase_intent: 12, ask_link: 7, ask_price: 3 },
+      high_intent_density: 16,
+      top_question: "how to checkout",
+      top_question_count: 5,
     },
   },
   {
     label: "暖场留人",
     payload: {
-      online_viewers: 1088,
-      online_viewers_delta: -13.6,
       gpm_cents: 18800,
       gpm_delta: -4.1,
       conversion_rate: 1.4,
       conversion_rate_delta: -0.1,
       comment_sentiment: 0.62,
       interaction_rate: 1.9,
+      intent_distribution: { ask_price: 4, ask_size: 3, other: 8 },
+      high_intent_density: 3,
+      top_question: "what is the price",
+      top_question_count: 3,
     },
   },
   {
     label: "冷场预警",
     payload: {
-      online_viewers: 1260,
-      online_viewers_delta: -2.1,
       gpm_cents: 21600,
       gpm_delta: -7.8,
       conversion_rate: 1.1,
       conversion_rate_delta: -0.2,
       comment_sentiment: 0.38,
       interaction_rate: 0.6,
+      intent_distribution: { authenticity_doubt: 6, ask_price: 4, other: 5 },
+      high_intent_density: 2,
+      top_question: "is this authentic",
+      top_question_count: 6,
     },
   },
+];
+
+const signalInputFields: Array<{
+  key: keyof Pick<
+    MonitorSignalPayload,
+    | "online_viewers"
+    | "online_viewers_delta"
+    | "gpm_cents"
+    | "gpm_delta"
+    | "conversion_rate"
+    | "conversion_rate_delta"
+    | "high_intent_density"
+    | "top_question_count"
+    | "interaction_rate"
+  >;
+  label: string;
+}> = [
+  { key: "online_viewers", label: "Online viewers" },
+  { key: "online_viewers_delta", label: "Viewer delta %" },
+  { key: "gpm_cents", label: "GPM cents" },
+  { key: "gpm_delta", label: "GPM delta %" },
+  { key: "conversion_rate", label: "Conversion rate %" },
+  { key: "conversion_rate_delta", label: "Conversion delta %" },
+  { key: "high_intent_density", label: "High-intent / min" },
+  { key: "top_question_count", label: "Repeated question count" },
+  { key: "interaction_rate", label: "Interaction rate %" },
 ];
 
 function formatSigned(value: number) {
@@ -81,10 +116,39 @@ function metricTone(value: number, positiveGood = true) {
 }
 
 export default function MonitorPage() {
-  const [payload, setPayload] = useState<MonitorSignalPayload>(scenarios[0].payload);
+  const [payload, setPayload] = useState<MonitorSignalPayload>({
+    online_viewers: 0,
+    online_viewers_delta: 0,
+    ...scenarios[0].payload,
+  });
   const [response, setResponse] = useState<MonitorResponse | null>(null);
   const [history, setHistory] = useState<MonitorResponse[]>([]);
   const [status, setStatus] = useState("idle");
+
+  useEffect(() => {
+    async function syncLiveMetrics() {
+      try {
+        const metrics = await fetchLiveMetrics();
+        setPayload((current) => ({
+          ...current,
+          online_viewers: metrics.online_viewers,
+          online_viewers_delta: metrics.online_viewers_delta,
+          comment_sentiment: metrics.comment_sentiment,
+          interaction_rate: metrics.interaction_rate,
+          intent_distribution: metrics.intent_distribution,
+          high_intent_density: metrics.high_intent_density,
+          top_question: metrics.top_question,
+          top_question_count: metrics.top_question_count,
+        }));
+      } catch {
+        setStatus("metrics offline");
+      }
+    }
+
+    void syncLiveMetrics();
+    const intervalId = window.setInterval(syncLiveMetrics, 3000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   const metricCards = useMemo(
     () => [
@@ -107,25 +171,52 @@ export default function MonitorPage() {
         tone: metricTone(payload.conversion_rate_delta),
       },
       {
-        label: "弹幕情绪",
-        value: `${Math.round(payload.comment_sentiment * 100)}%`,
-        delta: payload.comment_sentiment >= 0.55 ? "正向" : "偏冷",
-        tone: payload.comment_sentiment >= 0.55 ? "text-emerald-700" : "text-rose-700",
+        label: "High-intent density",
+        value: `${payload.high_intent_density.toFixed(0)}/min`,
+        delta: payload.high_intent_density >= 3 ? "rising" : "normal",
+        tone: payload.high_intent_density >= 3 ? "text-rose-700" : "text-emerald-700",
       },
     ],
     [payload],
   );
 
+  const topIntentEntries = useMemo(
+    () =>
+      Object.entries(payload.intent_distribution)
+        .filter(([, count]) => count > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3),
+    [payload.intent_distribution],
+  );
+
+  async function getPayloadWithLiveViewers(nextPayload = payload) {
+    const liveMetrics = await fetchLiveMetrics();
+    return {
+      ...nextPayload,
+      online_viewers: liveMetrics.online_viewers,
+      online_viewers_delta: liveMetrics.online_viewers_delta,
+      comment_sentiment: liveMetrics.comment_sentiment,
+      interaction_rate: Math.max(nextPayload.interaction_rate, liveMetrics.interaction_rate),
+      intent_distribution: liveMetrics.intent_distribution,
+      high_intent_density: liveMetrics.high_intent_density,
+      top_question: liveMetrics.top_question,
+      top_question_count: liveMetrics.top_question_count,
+    };
+  }
+
   async function runMonitor(nextPayload = payload) {
     setStatus("running");
     try {
-      const result = await sendMonitorSignal(nextPayload);
+      const livePayload = await getPayloadWithLiveViewers(nextPayload);
+      setPayload(livePayload);
+      const result = await sendMonitorSignal(livePayload);
       setResponse(result);
       setMonitorSignal({
         scenarioLabel: result.scenario.label,
         scenarioReason: result.scenario.reason,
         urgency: result.scenario.urgency,
         hookLabel: result.hook.label,
+        hostCue: result.hook.host_cue,
         script: result.hook.script,
         signals: result.signals,
       });
@@ -136,20 +227,27 @@ export default function MonitorPage() {
     }
   }
 
-  function applyScenario(nextPayload: MonitorSignalPayload) {
-    setPayload(nextPayload);
-    void runMonitor(nextPayload);
+  function applyScenario(
+    nextPayload: Omit<MonitorSignalPayload, "online_viewers" | "online_viewers_delta">,
+  ) {
+    const mergedPayload = {
+      ...payload,
+      ...nextPayload,
+    };
+    setPayload(mergedPayload);
+    void runMonitor(mergedPayload);
   }
 
   return (
     <AppShell
       eyebrow="Monitor"
       title="监控 agent"
-      description="监测在线人数、GPM、弹幕情绪和互动率，识别直播场景并输出主播话术。"
+      description="Monitor real viewer count, chat intent, high-intent density, and repeated unanswered questions."
     >
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
           <StatusPill tone="good">直播中</StatusPill>
+          <StatusPill>Live viewers {payload.online_viewers}</StatusPill>
           <StatusPill>{status === "running" ? "MonitorAgent running" : "MonitorAgent ready"}</StatusPill>
         </div>
         <button
@@ -173,20 +271,17 @@ export default function MonitorPage() {
       <div className="mt-4 grid gap-4 xl:grid-cols-[1fr_0.95fr]">
         <Panel title="实时信号" eyebrow="agent input">
           <div className="grid gap-3 md:grid-cols-2">
-            {[
-              ["online_viewers", "在线人数"],
-              ["online_viewers_delta", "在线人数波动 %"],
-              ["gpm_cents", "GPM cents"],
-              ["gpm_delta", "GPM 波动 %"],
-              ["conversion_rate", "转化率 %"],
-              ["conversion_rate_delta", "转化率波动 %"],
-              ["comment_sentiment", "弹幕情绪 0-1"],
-              ["interaction_rate", "互动率 %"],
-            ].map(([key, label]) => (
+            {signalInputFields.map(({ key, label }) => (
               <label className="text-sm font-medium text-slate-700" key={key}>
                 {label}
                 <input
                   className="mt-1 h-10 w-full rounded-md border border-slate-200 bg-slate-50 px-3 text-sm outline-none focus:border-teal-500 focus:bg-white"
+                  disabled={
+                    key === "online_viewers" ||
+                    key === "online_viewers_delta" ||
+                    key === "high_intent_density" ||
+                    key === "top_question_count"
+                  }
                   onChange={(event) =>
                     setPayload((current) => ({
                       ...current,
@@ -194,10 +289,45 @@ export default function MonitorPage() {
                     }))
                   }
                   type="number"
-                  value={payload[key as keyof MonitorSignalPayload]}
+                  value={payload[key]}
                 />
               </label>
             ))}
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <div className="rounded-md border border-teal-100 bg-teal-50 p-4">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Top chat intents
+              </p>
+              <div className="mt-3 space-y-2">
+                {topIntentEntries.map(([intent], index) => (
+                  <div
+                    className="rounded-md bg-white px-3 py-2"
+                    key={intent}
+                  >
+                    <span className="text-sm font-semibold text-slate-950">
+                      Top{index + 1} {intent.replaceAll("_", " ")}
+                    </span>
+                  </div>
+                ))}
+                {topIntentEntries.length === 0 ? (
+                  <p className="rounded-md bg-white px-3 py-2 text-sm text-slate-500">
+                    No intent messages yet.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                Question backlog
+              </p>
+              <p className="mt-2 text-sm font-semibold text-slate-950">
+                {payload.top_question ?? "none"}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">
+                {payload.top_question_count} repeated messages
+              </p>
+            </div>
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <span className="text-sm text-slate-500">模拟场景：</span>
@@ -226,9 +356,24 @@ export default function MonitorPage() {
                   {response.scenario.urgency}
                 </StatusPill>
               </div>
-              <p className="mt-4 rounded-md bg-white p-4 text-base leading-7 text-slate-950">
-                {response.hook.script}
-              </p>
+              {response.hook.host_cue ? (
+                <div className="mt-4 rounded-md border border-amber-100 bg-amber-50 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+                    Host Cue
+                  </p>
+                  <p className="mt-2 text-sm leading-6 text-slate-800">
+                    {response.hook.host_cue}
+                  </p>
+                </div>
+              ) : null}
+              <div className="mt-3 rounded-md bg-white p-4">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Suggested Line
+                </p>
+                <p className="mt-2 text-base leading-7 text-slate-950">
+                  {response.hook.script}
+                </p>
+              </div>
               <p className="mt-3 text-sm leading-6 text-slate-600">{response.scenario.reason}</p>
             </div>
           ) : (
@@ -250,7 +395,16 @@ export default function MonitorPage() {
                 <p className="text-sm font-semibold text-slate-950">{item.scenario.label}</p>
                 <p className="mt-1 text-xs text-slate-500">{new Date(item.created_at).toLocaleTimeString()}</p>
               </div>
-              <p className="text-sm leading-6 text-slate-700">{item.hook.script}</p>
+              <div className="grid gap-2">
+                {item.hook.host_cue ? (
+                  <p className="text-xs leading-5 text-amber-700">
+                    Host Cue: {item.hook.host_cue}
+                  </p>
+                ) : null}
+                <p className="text-sm leading-6 text-slate-700">
+                  Suggested Line: {item.hook.script}
+                </p>
+              </div>
             </article>
           ))}
           {history.length === 0 ? (
