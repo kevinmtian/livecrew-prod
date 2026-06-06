@@ -13,9 +13,17 @@ import {
   Send,
 } from "lucide-react";
 import { AppShell } from "@/components/AppShell";
+import { HostBroadcast } from "@/components/HostBroadcast";
 import { MetricCard } from "@/components/MetricCard";
 import { Panel } from "@/components/Panel";
 import { StatusPill } from "@/components/StatusPill";
+import {
+  formatGmv,
+  getLiveState,
+  postLiveReset,
+  summarizeOrdersBySku,
+  type BackendState,
+} from "@/lib/backend-client";
 import {
   activeSkuId,
   getActiveSkuDisplay,
@@ -25,6 +33,7 @@ import {
 import { chatMessages, liveSession } from "@/lib/mockData";
 import {
   fetchRoomState,
+  groupViewerQuestions,
   mergeViewerMessages,
   publishRoomEvent,
   readRoomState,
@@ -84,6 +93,15 @@ function getClockLabel(index: number) {
   return `0${Math.floor((index + 3) / 2)}:${index % 2 === 0 ? "20" : "45"}`;
 }
 
+function formatStableTime(timestamp: number) {
+  const date = new Date(timestamp || 0);
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  const seconds = String(date.getSeconds()).padStart(2, "0");
+
+  return `${hours}:${minutes}:${seconds}`;
+}
+
 const initialViewerMessages: ViewerMessage[] = chatMessages.map((message, index) => ({
   id: message.id,
   user: message.user,
@@ -101,13 +119,22 @@ export default function HostPage() {
   );
   const [suggestedReplies, setSuggestedReplies] = useState(replyTemplates);
   const [ledgerEvents, setLedgerEvents] = useState<LedgerEvent[]>(starterLedger);
+  const [backendState, setBackendState] = useState<BackendState | null>(null);
+  const [backendError, setBackendError] = useState<string | null>(null);
   const seenViewerMessageIds = useRef(
     new Set(initialViewerMessages.map((message) => message.id)),
   );
 
-  const activeProduct = getActiveSkuDisplay(
-    productCatalogue[activeIndex]?.id ?? activeSkuId,
-  );
+  const activeProductId = backendState?.active_sku_id ?? productCatalogue[activeIndex]?.id ?? activeSkuId;
+  const activeProduct = getActiveSkuDisplay(activeProductId);
+  const activeBackendSku = backendState?.skus[activeProduct.id];
+  const activePrice = activeBackendSku?.current_price ?? activeProduct.price;
+  const activeStock = activeBackendSku?.stock ?? activeProduct.stock;
+  const orderSummary = backendState
+    ? summarizeOrdersBySku(backendState.orders, backendState.skus)
+    : [];
+  const backendLedgerEvents = backendState?.event_ledger ?? [];
+  const groupedViewerQuestions = groupViewerQuestions(viewerChat);
 
   const detectedProduct = useMemo(
     () => resolveSkuFromText(transcript),
@@ -176,6 +203,34 @@ export default function HostPage() {
       window.clearInterval(poll);
       unsubscribe();
     };
+  }, []);
+
+  useEffect(() => {
+    function pollBackendState() {
+      void getLiveState()
+        .then((state) => {
+          setBackendState(state);
+          setBackendError(null);
+
+          if (state.active_sku_id) {
+            const backendActiveIndex = productCatalogue.findIndex(
+              (product) => product.id === state.active_sku_id,
+            );
+
+            if (backendActiveIndex >= 0) {
+              setActiveIndex(backendActiveIndex);
+            }
+          }
+        })
+        .catch((error: unknown) => {
+          setBackendError(error instanceof Error ? error.message : "Backend unavailable");
+        });
+    }
+
+    pollBackendState();
+    const poll = window.setInterval(pollBackendState, 1000);
+
+    return () => window.clearInterval(poll);
   }, []);
 
   function addLedgerEvent(event: string, detail: string, status: LedgerEvent["status"]) {
@@ -274,6 +329,14 @@ export default function HostPage() {
     setSuggestedReplies(replyTemplates);
     setLedgerEvents(starterLedger);
     publishRoomEvent({ type: "reset-room" });
+    void postLiveReset()
+      .then((state) => {
+        setBackendState(state);
+        setBackendError(null);
+      })
+      .catch((error: unknown) => {
+        setBackendError(error instanceof Error ? error.message : "Backend reset failed");
+      });
   }
 
   return (
@@ -286,7 +349,35 @@ export default function HostPage() {
         <MetricCard label="Runtime" value={liveSession.runtime} detail={liveSession.host} />
         <MetricCard label="Live viewers" value={liveSession.audience.toLocaleString()} detail="Mock active audience" />
         <MetricCard label="Active SKU" value={activeProduct.aliasLabel} detail={activeProduct.name} />
-        <MetricCard label="Ledger events" value={String(ledgerEvents.length)} detail="Local sample feed" />
+        <MetricCard label="Backend orders" value={String(backendState?.orders.length ?? 0)} detail={backendError ?? "FastAPI state"} />
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
+        <Panel title="Live Camera" action={<StatusPill tone="live">WebRTC host</StatusPill>}>
+          <HostBroadcast />
+        </Panel>
+
+        <Panel
+          title="Stream State"
+          action={<StatusPill tone="good">{activeProduct.aliasLabel}</StatusPill>}
+        >
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-md border border-line bg-panel p-4">
+              <p className="text-xs font-semibold uppercase text-slate-500">On-air SKU</p>
+              <p className="mt-2 text-lg font-semibold text-ink">{activeProduct.name}</p>
+              <p className="mt-1 text-sm text-slate-600">
+                {activePrice} / {activeStock} stock
+              </p>
+            </div>
+            <div className="rounded-md border border-line bg-panel p-4">
+              <p className="text-xs font-semibold uppercase text-slate-500">Audience</p>
+              <p className="mt-2 text-lg font-semibold text-ink">
+                {liveSession.audience.toLocaleString()}
+              </p>
+              <p className="mt-1 text-sm text-slate-600">{liveSession.status}</p>
+            </div>
+          </div>
+        </Panel>
       </div>
 
       <div className="flex flex-wrap gap-2 rounded-md border border-line bg-white p-3 shadow-soft">
@@ -360,7 +451,7 @@ export default function HostPage() {
                   {activeProduct.name}
                 </h2>
                 <p className="mt-2 text-sm text-slate-600">
-                  {activeProduct.price} - {activeProduct.stock} in stock
+                  {activePrice} - {activeStock} in stock
                 </p>
               </div>
               <StatusPill tone="good">{activeProduct.aliasLabel}</StatusPill>
@@ -392,31 +483,115 @@ export default function HostPage() {
                   publishRoomEvent({ type: "active-sku", skuId: product.id });
                 }}
               >
-                {product.name}
+                <span className="block">{product.name}</span>
+                <span className="mt-1 block font-normal opacity-80">
+                  {backendState?.skus[product.id]?.current_price ?? product.price} / stock{" "}
+                  {backendState?.skus[product.id]?.stock ?? product.stock}
+                </span>
               </button>
             ))}
           </div>
         </Panel>
 
+        <Panel title="Backend Flash Sale">
+          {backendState?.flash_sale ? (
+            <div className="rounded-md border border-rose-200 bg-rose-50 p-4 text-rose-950">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-semibold">Limited-time offer</p>
+                <StatusPill tone="live">Live</StatusPill>
+              </div>
+              <p className="mt-3 text-lg font-semibold">
+                {backendState.skus[backendState.flash_sale.sku_id]?.name ??
+                  backendState.flash_sale.sku_id}
+              </p>
+              <p className="mt-2 text-sm">
+                {backendState.flash_sale.sale_price} -{" "}
+                {backendState.flash_sale.remaining}/{backendState.flash_sale.total} left
+              </p>
+              <p className="mt-1 text-sm">
+                ends in {backendState.flash_sale.ends_in_seconds}s
+              </p>
+            </div>
+          ) : (
+            <div className="rounded-md border border-line bg-panel p-4 text-sm text-slate-600">
+              No backend flash sale is active.
+            </div>
+          )}
+        </Panel>
+      </div>
+
+      <div className="grid gap-4 xl:grid-cols-[1fr_1fr_0.9fr]">
+        <Panel title="SKU Prices / Stocks">
+          <div className="space-y-3">
+            {Object.values(backendState?.skus ?? {}).map((sku) => (
+              <div
+                key={sku.id}
+                className="grid grid-cols-[1fr_auto] gap-3 rounded-md border border-line bg-panel p-3"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-ink">{sku.name}</p>
+                  <p className="mt-1 text-xs text-slate-500">{sku.id}</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm font-semibold text-ink">{sku.current_price}</p>
+                  <p className="mt-1 text-xs text-slate-500">{sku.stock} stock</p>
+                </div>
+              </div>
+            ))}
+            {!backendState ? (
+              <div className="rounded-md border border-line bg-panel p-3 text-sm text-slate-600">
+                Waiting for backend state.
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+
+        <Panel title="Orders by SKU">
+          <div className="space-y-3">
+            {orderSummary.map((item) => (
+              <div
+                key={item.sku_id}
+                className="grid grid-cols-[1fr_auto_auto] items-center gap-3 rounded-md border border-line bg-panel p-3"
+              >
+                <p className="min-w-0 truncate text-sm font-semibold text-ink">{item.name}</p>
+                <p className="text-sm text-slate-700">{item.units} units</p>
+                <p className="text-sm font-semibold text-ink">{formatGmv(item.gmv)}</p>
+              </div>
+            ))}
+            {orderSummary.length === 0 ? (
+              <div className="rounded-md border border-line bg-panel p-3 text-sm text-slate-600">
+                No backend orders yet.
+              </div>
+            ) : null}
+          </div>
+        </Panel>
+
         <Panel title="Viewer Chat">
           <div className="max-h-[360px] space-y-3 overflow-y-auto pr-1">
-            {viewerChat.map((message) => (
+            {groupedViewerQuestions.map((group) => (
               <article
-                key={message.id}
+                key={group.key}
                 className="rounded-md border border-line bg-panel p-3"
               >
                 <div className="flex items-center justify-between gap-3">
                   <span className="inline-flex min-w-0 items-center gap-2 text-sm font-semibold text-ink">
                     <Radio className="h-4 w-4 shrink-0 text-slate-500" aria-hidden="true" />
-                    <span className="truncate">{message.user}</span>
+                    <span className="truncate">
+                      {group.count} {group.count === 1 ? "viewer" : "viewers"}
+                    </span>
                   </span>
-                <StatusPill tone={message.priority === "High" ? "warn" : "neutral"}>
-                    {message.priority ?? "Live"}
+                  <StatusPill tone={group.priority === "High" ? "warn" : "neutral"}>
+                    {group.priority ?? "Live"}
                   </StatusPill>
                 </div>
-                <p className="mt-2 text-sm leading-6 text-slate-700">{message.text}</p>
+                <p className="mt-2 text-sm leading-6 text-slate-700">
+                  {group.primaryText}
+                </p>
+                <p className="mt-2 text-xs text-slate-500">
+                  {group.viewerNames.join(", ")}
+                </p>
                 <p className="mt-2 text-xs font-semibold uppercase text-slate-500">
-                  {message.intent ?? "Viewer message"}
+                  {group.category} / latest {formatStableTime(group.latestTimestamp)}
                 </p>
               </article>
             ))}
@@ -454,9 +629,35 @@ export default function HostPage() {
 
         <Panel
           title="Agent Event Timeline / Commerce Ledger"
-          action={<StatusPill tone="good">{ledgerEvents.length} events</StatusPill>}
+          action={
+            <StatusPill tone="good">
+              {backendLedgerEvents.length + ledgerEvents.length} events
+            </StatusPill>
+          }
         >
           <div className="space-y-3">
+            {backendLedgerEvents.map((item) => (
+              <article
+                key={item.id}
+                className="grid gap-3 rounded-md border border-line bg-panel p-3 sm:grid-cols-[160px_1fr_auto]"
+              >
+                <span className="text-xs font-semibold text-slate-500">
+                  {formatStableTime(new Date(item.ts).getTime())}
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-ink">{item.action}</h3>
+                  <p className="mt-1 break-words text-sm leading-6 text-slate-600">
+                    {Object.entries(item)
+                      .filter(([key]) => !["id", "ts", "action"].includes(key))
+                      .map(([key, value]) => `${key}: ${String(value)}`)
+                      .join(" / ")}
+                  </p>
+                </div>
+                <StatusPill tone={item.action === "order" ? "good" : "neutral"}>
+                  Backend
+                </StatusPill>
+              </article>
+            ))}
             {ledgerEvents.map((item) => (
               <article
                 key={item.id}
@@ -480,32 +681,53 @@ export default function HostPage() {
                 </StatusPill>
               </article>
             ))}
+            {backendLedgerEvents.length + ledgerEvents.length === 0 ? (
+              <div className="rounded-md border border-line bg-panel p-3 text-sm text-slate-600">
+                No commerce events yet.
+              </div>
+            ) : null}
           </div>
         </Panel>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Panel
-          title="Backend Commerce Placeholder"
-          action={<StatusPill>Local only</StatusPill>}
+          title="Backend Commerce"
+          action={<StatusPill>{backendError ? "Offline" : "Connected"}</StatusPill>}
         >
-          <div className="grid gap-3 sm:grid-cols-3">
-            {[
-              ["Cart API", "Not connected"],
-              ["Inventory sync", "Mock stock"],
-              ["Checkout", "Disabled"],
-            ].map(([label, value]) => (
+          <div className="grid gap-3 sm:grid-cols-2">
+            {Object.values(backendState?.skus ?? {}).map((sku) => {
+              const summary = orderSummary.find((item) => item.sku_id === sku.id);
+
+              return (
+                <div
+                  key={sku.id}
+                  className="rounded-md border border-line bg-panel p-4"
+                >
+                  <Database className="h-5 w-5 text-slate-600" aria-hidden="true" />
+                  <p className="mt-3 text-sm font-semibold text-ink">{sku.name}</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {summary?.units ?? 0} units sold
+                  </p>
+                  <p className="mt-2 text-lg font-semibold text-ink">
+                    {formatGmv(summary?.gmv ?? 0)}
+                  </p>
+                </div>
+              );
+            })}
+            {!backendState ? (
               <div
-                key={label}
                 className="rounded-md border border-line bg-panel p-4"
               >
                 <Database className="h-5 w-5 text-slate-600" aria-hidden="true" />
-                <p className="mt-3 text-xs font-semibold uppercase text-slate-500">
-                  {label}
+                <p className="mt-3 text-sm font-semibold text-ink">
+                  Waiting for FastAPI backend
                 </p>
-                <p className="mt-1 text-sm font-semibold text-ink">{value}</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  {backendError ?? "Polling /live/state every second"}
+                </p>
               </div>
-            ))}
+            ) : null}
           </div>
         </Panel>
 

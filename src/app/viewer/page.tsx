@@ -13,6 +13,12 @@ import { AppShell } from "@/components/AppShell";
 import { MetricCard } from "@/components/MetricCard";
 import { Panel } from "@/components/Panel";
 import { StatusPill } from "@/components/StatusPill";
+import { ViewerBroadcast } from "@/components/ViewerBroadcast";
+import {
+  getLiveState,
+  postLiveOrder,
+  type BackendState,
+} from "@/lib/backend-client";
 import { activeSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import { chatMessages, liveSession, viewerActions } from "@/lib/mockData";
 import {
@@ -58,7 +64,8 @@ const initialViewerMessages: ViewerMessage[] = chatMessages.map((message, index)
 
 export default function ViewerPage() {
   const [activeProductId, setActiveProductId] = useState(activeSkuId);
-  const featuredProduct = getActiveSkuDisplay(activeProductId);
+  const [backendState, setBackendState] = useState<BackendState | null>(null);
+  const [orderStatus, setOrderStatus] = useState<string | null>(null);
   const [messageText, setMessageText] = useState("");
   const [messages, setMessages] = useState<ViewerMessage[]>(
     mergeViewerMessages([], initialViewerMessages),
@@ -66,6 +73,32 @@ export default function ViewerPage() {
   const [replies, setReplies] = useState(initialReplies);
   const [remainingSeconds, setRemainingSeconds] = useState(45);
   const [remainingUnits, setRemainingUnits] = useState(32);
+  const backendActiveProductId =
+    backendState?.flash_sale?.sku_id ?? backendState?.active_sku_id ?? activeProductId;
+  const featuredProduct = getActiveSkuDisplay(backendActiveProductId);
+  const backendSku = backendState?.skus[featuredProduct.id];
+  const backendFlashSale =
+    backendState?.flash_sale?.sku_id === featuredProduct.id
+      ? backendState.flash_sale
+      : null;
+  const displayPrice = backendFlashSale?.sale_price ?? backendSku?.current_price ?? featuredProduct.price;
+  const displayStock = backendSku?.stock ?? featuredProduct.stock;
+  const offerRemaining = backendFlashSale?.remaining ?? remainingUnits;
+  const offerTotal = backendFlashSale?.total ?? featuredProduct.stock;
+  const offerEndsIn = backendFlashSale?.ends_in_seconds ?? remainingSeconds;
+
+  function syncBackendState(state: BackendState) {
+    setBackendState(state);
+
+    if (state.active_sku_id) {
+      setActiveProductId(state.active_sku_id);
+      return;
+    }
+
+    if (state.flash_sale?.sku_id) {
+      setActiveProductId(state.flash_sale.sku_id);
+    }
+  }
 
   function syncRoomState(roomState: Awaited<ReturnType<typeof readRoomState>>) {
     setActiveProductId(roomState.activeSkuId);
@@ -124,6 +157,17 @@ export default function ViewerPage() {
   }, []);
 
   useEffect(() => {
+    function pollBackendState() {
+      void getLiveState().then(syncBackendState).catch(() => {});
+    }
+
+    pollBackendState();
+    const poll = window.setInterval(pollBackendState, 1000);
+
+    return () => window.clearInterval(poll);
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       setRemainingSeconds((current) => (current > 0 ? current - 1 : 0));
     }, 1000);
@@ -152,6 +196,22 @@ export default function ViewerPage() {
     setMessageText("");
   }
 
+  function placeBackendOrder() {
+    setOrderStatus("Placing order...");
+    void postLiveOrder({
+      viewer: "viewer",
+      sku_id: featuredProduct.id,
+      qty: 1,
+    })
+      .then(({ state }) => {
+        syncBackendState(state);
+        setOrderStatus("Order placed");
+      })
+      .catch((error: unknown) => {
+        setOrderStatus(error instanceof Error ? error.message : "Order failed");
+      });
+  }
+
   return (
     <AppShell
       active="viewer"
@@ -174,17 +234,7 @@ export default function ViewerPage() {
           title="Live Stream"
           action={<StatusPill tone="live">{liveSession.status}</StatusPill>}
         >
-          <div className="flex aspect-video min-h-[240px] items-center justify-center rounded-md border border-slate-800 bg-slate-950 p-6 text-center text-white">
-            <div>
-              <p className="text-sm font-semibold uppercase text-slate-300">
-                {liveSession.title}
-              </p>
-              <p className="mt-3 text-3xl font-semibold">{liveSession.host}</p>
-              <p className="mt-2 text-sm text-slate-300">
-                {liveSession.audience.toLocaleString()} watching
-              </p>
-            </div>
-          </div>
+          <ViewerBroadcast />
         </Panel>
 
         <Panel
@@ -202,7 +252,7 @@ export default function ViewerPage() {
                 </h2>
               </div>
               <span className="text-2xl font-semibold text-ink">
-                {featuredProduct.price}
+                {displayPrice}
               </span>
             </div>
 
@@ -215,15 +265,15 @@ export default function ViewerPage() {
                 <StatusPill tone="live">Live</StatusPill>
               </div>
               <p className="mt-4 text-2xl font-semibold text-rose-950">
-                {remainingUnits}/{featuredProduct.stock} left
+                {offerRemaining}/{offerTotal} left
               </p>
               <p className="mt-2 text-sm font-medium text-rose-900">
-                ends in {remainingSeconds}s
+                ends in {offerEndsIn}s
               </p>
               <button
                 className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white"
                 type="button"
-                onClick={() => setRemainingUnits((current) => Math.max(current - 1, 0))}
+                onClick={placeBackendOrder}
               >
                 <ShoppingBag className="h-4 w-4" aria-hidden="true" />
                 Claim offer
@@ -241,9 +291,14 @@ export default function ViewerPage() {
                 </div>
               ))}
             </div>
+            <p className="mt-3 text-sm text-slate-600">
+              {displayStock} in stock
+              {orderStatus ? ` - ${orderStatus}` : ""}
+            </p>
             <button
               className="mt-5 inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white"
               type="button"
+              onClick={placeBackendOrder}
             >
               <ShoppingBag className="h-4 w-4" aria-hidden="true" />
               Add to cart

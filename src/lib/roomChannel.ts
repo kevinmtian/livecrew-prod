@@ -1,4 +1,5 @@
 import { activeSkuId } from "@/lib/catalogue";
+import { normalizeQuestionKey } from "@/lib/agent-analyzer";
 
 export type RoomViewerMessage = {
   id: string;
@@ -19,6 +20,17 @@ export type RoomState = {
   activeSkuId: string;
   viewerMessages: RoomViewerMessage[];
   hostReplies: RoomHostReply[];
+};
+
+export type ViewerQuestionGroup = {
+  key: string;
+  primaryText: string;
+  priority: RoomViewerMessage["priority"];
+  category: string;
+  count: number;
+  viewerNames: string[];
+  latestTimestamp: number;
+  originals: RoomViewerMessage[];
 };
 
 export type RoomEvent =
@@ -134,6 +146,56 @@ export function mergeViewerMessages(
   });
 
   return sortViewerMessages(Array.from(mergedMessages.values()));
+}
+
+export function groupViewerQuestions(messages: RoomViewerMessage[]) {
+  const groups = new Map<string, ViewerQuestionGroup>();
+
+  sortViewerMessages(messages).forEach((message) => {
+    const normalizedMessage = normalizeViewerMessage(message);
+    const key = normalizeQuestionKey(normalizedMessage.text);
+    const existingGroup = groups.get(key);
+
+    if (!existingGroup) {
+      groups.set(key, {
+        key,
+        primaryText: normalizedMessage.text,
+        priority: normalizedMessage.priority,
+        category: normalizedMessage.intent ?? "Viewer message",
+        count: 1,
+        viewerNames: [normalizedMessage.user],
+        latestTimestamp: normalizedMessage.createdAt ?? 0,
+        originals: [normalizedMessage],
+      });
+      return;
+    }
+
+    existingGroup.originals.push(normalizedMessage);
+    existingGroup.count = existingGroup.originals.length;
+    existingGroup.viewerNames = Array.from(
+      new Set([...existingGroup.viewerNames, normalizedMessage.user]),
+    );
+
+    if ((normalizedMessage.createdAt ?? 0) > existingGroup.latestTimestamp) {
+      existingGroup.latestTimestamp = normalizedMessage.createdAt ?? 0;
+      existingGroup.primaryText = normalizedMessage.text;
+    }
+  });
+
+  return Array.from(groups.values()).sort((first, second) => {
+    const firstPriority = priorityRank[first.priority ?? "Live"];
+    const secondPriority = priorityRank[second.priority ?? "Live"];
+
+    if (firstPriority !== secondPriority) {
+      return firstPriority - secondPriority;
+    }
+
+    if (first.count !== second.count) {
+      return second.count - first.count;
+    }
+
+    return second.latestTimestamp - first.latestTimestamp;
+  });
 }
 
 export function readRoomState(): RoomState {
