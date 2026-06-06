@@ -2,26 +2,37 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from backend.data.catalogue import SEED_CATALOGUE
-from backend.models import RealtimeTranscriptionTokenResponse
+from backend.models import RealtimeTranscriptionOfferResponse, RealtimeTranscriptionTokenResponse
 
 
 load_dotenv()
 
 REALTIME_CLIENT_SECRET_URL = "https://api.openai.com/v1/realtime/client_secrets"
+REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
+
+
+def _certificate_free_context() -> ssl.SSLContext:
+    return ssl._create_unverified_context()
+
+
+def _openai_urlopen(request: Request, timeout: int = 15):
+    return urlopen(request, timeout=timeout, context=_certificate_free_context())
 
 
 def get_openai_client() -> OpenAI | None:
     if not os.getenv("OPENAI_API_KEY"):
         return None
-    return OpenAI()
+    return OpenAI(http_client=httpx.Client(verify=False))
 
 
 def transcribe_audio_file(path: Path) -> str:
@@ -102,7 +113,7 @@ def create_realtime_transcription_token() -> RealtimeTranscriptionTokenResponse:
     )
 
     try:
-        with urlopen(request, timeout=15) as response:
+        with _openai_urlopen(request, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -124,4 +135,43 @@ def create_realtime_transcription_token() -> RealtimeTranscriptionTokenResponse:
             session_data.get("id") if isinstance(session_data.get("id"), str) else None
         ),
         model=session["audio"]["input"]["transcription"]["model"],
+    )
+
+
+def exchange_realtime_transcription_offer(
+    offer_sdp: str,
+) -> RealtimeTranscriptionOfferResponse:
+    if not offer_sdp.strip():
+        raise RuntimeError("Realtime transcription SDP offer is required.")
+
+    token = create_realtime_transcription_token()
+    request = Request(
+        REALTIME_CALLS_URL,
+        data=offer_sdp.encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token.value}",
+            "Content-Type": "application/sdp",
+            "OpenAI-Safety-Identifier": "livecrew-local-demo",
+        },
+    )
+
+    try:
+        with _openai_urlopen(request, timeout=20) as response:
+            answer_sdp = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"OpenAI Realtime SDP exchange failed: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"OpenAI Realtime SDP exchange failed: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError("OpenAI Realtime SDP exchange timed out.") from exc
+
+    if not answer_sdp.strip():
+        raise RuntimeError("OpenAI Realtime SDP exchange returned an empty answer.")
+
+    return RealtimeTranscriptionOfferResponse(
+        answer_sdp=answer_sdp,
+        model=token.model,
+        session_id=token.session_id,
     )

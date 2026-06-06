@@ -25,7 +25,7 @@ import {
   type WorkflowResponse,
   approvePendingAction,
   createMediaSession,
-  createRealtimeTranscriptionToken,
+  exchangeRealtimeTranscriptionOffer,
   fetchBackendState,
   fetchMediaSession,
   getBackendUrl,
@@ -362,7 +362,6 @@ export default function HostPage() {
     setLiveTranscriptError("");
 
     try {
-      const token = await createRealtimeTranscriptionToken();
       const peer = new RTCPeerConnection();
       const dataChannel = peer.createDataChannel("oai-events");
       transcriptionPeerRef.current = peer;
@@ -373,7 +372,7 @@ export default function HostPage() {
         appendLedger({
           id: "evt-openai-realtime-transcript",
           label: "Realtime transcript ready",
-          detail: `OpenAI Realtime transcription connected with ${token.model}.`,
+          detail: "OpenAI Realtime transcription connected.",
           status: "watching",
         });
       });
@@ -402,22 +401,17 @@ export default function HostPage() {
         throw new Error("Browser did not create an SDP offer for transcription.");
       }
 
-      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        body: offer.sdp,
-        headers: {
-          Authorization: `Bearer ${token.value}`,
-          "Content-Type": "application/sdp",
-        },
-      });
-      if (!sdpResponse.ok) {
-        const detail = await sdpResponse.text();
-        throw new Error(detail || "OpenAI Realtime SDP exchange failed.");
-      }
+      const sdpResponse = await exchangeRealtimeTranscriptionOffer(offer.sdp);
 
       await peer.setRemoteDescription({
         type: "answer",
-        sdp: await sdpResponse.text(),
+        sdp: sdpResponse.answer_sdp,
+      });
+      appendLedger({
+        id: "evt-openai-realtime-model",
+        label: "Realtime transcript model",
+        detail: `Backend exchanged SDP with ${sdpResponse.model}.`,
+        status: "watching",
       });
     } catch (error) {
       transcriptionDataChannelRef.current?.close();

@@ -201,6 +201,16 @@ class RealtimeTranscriptionTokenResponse(BaseModel):
     model: str
 
 
+class RealtimeTranscriptionOfferRequest(BaseModel):
+    sdp: str
+
+
+class RealtimeTranscriptionOfferResponse(BaseModel):
+    answer_sdp: str
+    model: str
+    session_id: str | None = None
+
+
 class MediaSession(BaseModel):
     session_id: str
     status: Literal["waiting", "offer_ready", "answer_ready", "live", "stopped"] = "waiting"

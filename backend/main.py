@@ -18,6 +18,8 @@ from backend.models import (
     AppliedAction,
     LedgerEntry,
     PendingReplyRequest,
+    RealtimeTranscriptionOfferRequest,
+    RealtimeTranscriptionOfferResponse,
     RealtimeTranscriptionTokenResponse,
     SessionCreateResponse,
     SignalPayload,
@@ -30,6 +32,7 @@ from backend.models import (
 )
 from backend.openai_client import (
     create_realtime_transcription_token,
+    exchange_realtime_transcription_offer,
     transcribe_audio_file,
 )
 from backend.policies.guardrails import validate_action
@@ -234,6 +237,17 @@ async def transcribe_audio(file: UploadFile = File(...)):
 def realtime_transcription_token():
     try:
         return create_realtime_transcription_token()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post(
+    "/events/realtime-transcription-offer",
+    response_model=RealtimeTranscriptionOfferResponse,
+)
+def realtime_transcription_offer(request: RealtimeTranscriptionOfferRequest):
+    try:
+        return exchange_realtime_transcription_offer(request.sdp)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
