@@ -7,6 +7,7 @@ import {
   defaultActiveSkuId,
   getActiveSkuDisplay,
   resolveSkuById,
+  resolveSkuFromText,
 } from "@/lib/catalogue";
 import {
   appendAgentReply,
@@ -86,8 +87,6 @@ type RealtimeTranscriptionEvent = {
     message?: string;
   };
 };
-
-const MAX_VIEWER_MONITOR_QUEUE_ITEMS = 3;
 
 type AgentRole =
   | "Input"
@@ -230,17 +229,23 @@ function getCommentCreatedAt(comment: ViewerComment) {
 
 function dedupeViewerComments(
   comments: ViewerComment[],
+  activeSkuId: string | null | undefined,
   activeSkuName: string,
   activeSkuAliases: string[],
 ) {
   const productTerms = [activeSkuName, ...activeSkuAliases]
     .map(normalizeChatText)
     .filter((term) => term.length >= 3);
+  const normalizedActiveSkuId = activeSkuId ?? null;
   const groupedComments = comments.reduce<Record<string, QueuedViewerComment>>(
     (groups, comment) => {
       const key = normalizeChatText(comment.text);
       const existingComment = groups[key];
-      const isProductRelated = productTerms.some((term) => key.includes(term));
+      const matchedSku = resolveSkuFromText(comment.text);
+      const isProductRelated =
+        (normalizedActiveSkuId !== null && comment.sku_id === normalizedActiveSkuId) ||
+        (normalizedActiveSkuId !== null && matchedSku?.id === normalizedActiveSkuId) ||
+        productTerms.some((term) => key.includes(term));
 
       if (!existingComment) {
         groups[key] = {
@@ -1024,6 +1029,7 @@ export default function HostPage() {
         comment.reply_status !== "suggested" &&
         !resolvedDraftIds.includes(comment.id),
     ) ?? [],
+    backendState?.active_sku_id ?? activeSkuId,
     backendActiveSku?.name ?? activeProduct.name,
     backendActiveSku?.aliases ?? activeProduct.aliases,
   );
@@ -1076,15 +1082,7 @@ export default function HostPage() {
       ? normalizeChatText(comment.text) !== normalizeChatText(activeInteractionCue.text)
       : true,
   );
-  const viewerCommentCount = waitingViewerComments.length;
-  const recentViewerComments = waitingViewerComments.slice(
-    0,
-    MAX_VIEWER_MONITOR_QUEUE_ITEMS,
-  );
-  const hiddenViewerCommentCount = Math.max(
-    0,
-    viewerCommentCount - recentViewerComments.length,
-  );
+  const recentViewerComments = waitingViewerComments;
   const activeInsight = latestInsight ?? backendState?.viewer_insights[0] ?? null;
   const topChatIntentLines =
     splitTopChatIntents(
@@ -2654,11 +2652,6 @@ export default function HostPage() {
                   <p className="text-sm font-semibold text-slate-900">
                     Waiting queue
                   </p>
-                  {hiddenViewerCommentCount > 0 ? (
-                    <p className="text-xs font-medium text-slate-500">
-                      {hiddenViewerCommentCount} more archived
-                    </p>
-                  ) : null}
                 </div>
                 <div className="mt-3 max-h-72 space-y-3 overflow-y-auto pr-2 [scrollbar-gutter:stable] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:rounded-full [&::-webkit-scrollbar-track]:bg-slate-100 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-slate-300">
                   {recentViewerComments.map((comment) => (
