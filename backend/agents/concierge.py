@@ -46,6 +46,10 @@ UNSAFE_RE = re.compile(
 MALICIOUS_RE = re.compile(r"\b(ignore instructions|jailbreak|system prompt|developer message)\b", re.IGNORECASE)
 COMPARISON_RE = re.compile(r"\b(compare|better than|versus|vs\.?|difference)\b", re.IGNORECASE)
 CLARIFICATION_RE = re.compile(r"\b(which|what product|what is this|this one|it)\b", re.IGNORECASE)
+ORIGIN_RE = re.compile(
+    r"\b(country|origin|made in|manufactur(?:ed|er)|factory|where is .* from|where .* made|from)\b",
+    re.IGNORECASE,
+)
 PRODUCT_QUESTION_RE = re.compile(
     r"\b(price|cost|how much|stock|left|available|size|big|capacity|ml|spf|morning|night|routine|use|refill|finish|strap|light|hot|cold|product|item|current|pinned)\b",
     re.IGNORECASE,
@@ -242,6 +246,16 @@ def _safe_risk_reply(text: str, sku_id: str | None, state: CommerceState) -> tup
     )
 
 
+def _unverified_origin_reply(sku_id: str | None, state: CommerceState) -> tuple[str, list[str]]:
+    sku = get_sku_by_id(sku_id, state.skus) if sku_id else get_sku_by_id(state.active_sku_id, state.skus)
+    name = sku.name if sku else "this product"
+    return (
+        f"I do not have a verified country of origin for {name} in the current product catalogue. "
+        "The host should confirm it before answering viewers.",
+        [name, "country of origin not listed"],
+    )
+
+
 def _resolve_context_sku(text: str, state: CommerceState, extracted_sku_id: str | None) -> tuple[str | None, list[str]]:
     explicit_sku = resolve_sku_from_text(text, state.skus)
     if explicit_sku:
@@ -263,6 +277,10 @@ def _classify_deterministic(text: str, state: CommerceState) -> ExtractedViewerM
         intent: ViewerIntent = "malicious"
         confidence = 0.92
         reason = "Viewer message attempted to manipulate system instructions."
+    elif ORIGIN_RE.search(text):
+        intent = "product_clarification"
+        confidence = 0.86
+        reason = "Viewer asked for country of origin or manufacturing details."
     elif UNSAFE_RE.search(text):
         intent = "skin_safety"
         confidence = 0.86
@@ -312,6 +330,7 @@ def _has_commerce_relevance(text: str, state: CommerceState) -> bool:
             bool(PRODUCT_QUESTION_RE.search(text)),
             bool(PROMO_RE.search(text)),
             bool(UNSAFE_RE.search(text)),
+            bool(ORIGIN_RE.search(text)),
             bool(COMPARISON_RE.search(text)),
             bool(CLARIFICATION_RE.search(text)),
             has_order_intent(text),
@@ -331,6 +350,24 @@ def _build_actions(
 
     if extracted.intent == "malicious":
         return []
+
+    if ORIGIN_RE.search(text):
+        reply, reply_evidence = _unverified_origin_reply(sku_id, state)
+        actions.append(
+            ProposedAction(
+                type="suggest_reply",
+                sku_id=sku_id,
+                source_text=text,
+                input_source="viewer_message",
+                reply_text=reply,
+                viewer=viewer,
+                confidence=0.9,
+                reason="Country of origin is not verified in the current product catalogue.",
+                evidence=[*evidence, *reply_evidence],
+                requires_host_confirmation=True,
+            )
+        )
+        return actions
 
     if extracted.intent in {"ambiguous", "off_topic"}:
         return []
