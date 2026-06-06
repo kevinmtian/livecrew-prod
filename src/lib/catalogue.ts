@@ -12,7 +12,7 @@ export const productCatalogue: ProductSku[] = [
     id: "sku-glowfix-vitamin-c-serum",
     name: "GlowFix Vitamin C Serum",
     aliases: ["glowfix", "vitamin c serum", "vit c serum", "glow serum"],
-    price: "$42",
+    price: "S$29.90",
     stock: 118,
     facts: [
       "15% vitamin C brightening serum",
@@ -24,7 +24,7 @@ export const productCatalogue: ProductSku[] = [
     id: "sku-hydramist-cushion-spf",
     name: "HydraMist Cushion SPF",
     aliases: ["hydramist", "cushion spf", "spf cushion", "mist cushion"],
-    price: "$36",
+    price: "S$36.00",
     stock: 92,
     facts: [
       "SPF 50 cushion compact with dewy finish",
@@ -36,7 +36,7 @@ export const productCatalogue: ProductSku[] = [
     id: "sku-bamboo-thermal-tumbler",
     name: "Bamboo Thermal Tumbler",
     aliases: ["bamboo tumbler", "thermal tumbler", "tumbler", "bamboo cup"],
-    price: "$28",
+    price: "S$24.50",
     stock: 164,
     facts: [
       "Double-wall insulated stainless steel core",
@@ -48,7 +48,7 @@ export const productCatalogue: ProductSku[] = [
     id: "sku-satin-cloud-sleep-mask",
     name: "Satin Cloud Sleep Mask",
     aliases: ["satin mask", "sleep mask", "cloud mask", "satin cloud"],
-    price: "$19",
+    price: "S$18.80",
     stock: 246,
     facts: [
       "Soft satin sleep mask with cushioned fill",
