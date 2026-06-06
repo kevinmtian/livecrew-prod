@@ -27,7 +27,10 @@ from backend.models import (
     MonitorSignalRequest,
     TextEventRequest,
     TranscriptionResponse,
+    ViewerLoginRequest,
+    ViewerLoginResponse,
     ViewerMessageRequest,
+    ViewerSession,
     WorkflowResponse,
 )
 from backend.openai_client import (
@@ -69,6 +72,66 @@ def get_state():
 @app.post("/reset")
 def reset_state():
     return commerce_store.reset()
+
+
+@app.post("/viewer-login", response_model=ViewerLoginResponse)
+def viewer_login(request: ViewerLoginRequest):
+    username = request.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required.")
+
+    state = commerce_store.get()
+    username_key = username.casefold()
+    if any(session.username.casefold() == username_key for session in state.viewer_sessions):
+        raise HTTPException(status_code=409, detail="Username is already logged in.")
+
+    session = ViewerSession(username=username)
+    ledger_entry = LedgerEntry(
+        type="viewer_logged_in",
+        detail=f"{username} logged in to the viewer room.",
+        payload={"session_id": session.id, "username": username},
+    )
+    state.viewer_sessions = [session, *state.viewer_sessions][:200]
+    state.ledger = [ledger_entry, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return ViewerLoginResponse(session=session, state=updated_state)
+
+
+@app.get("/viewer-login/{session_id}", response_model=ViewerLoginResponse)
+def get_viewer_login(session_id: str):
+    state = commerce_store.get()
+    session = next(
+        (viewer_session for viewer_session in state.viewer_sessions if viewer_session.id == session_id),
+        None,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Viewer session not found.")
+    return ViewerLoginResponse(session=session, state=state)
+
+
+@app.post("/viewer-login/{session_id}/logout", response_model=ViewerLoginResponse)
+def viewer_logout(session_id: str):
+    state = commerce_store.get()
+    session = next(
+        (viewer_session for viewer_session in state.viewer_sessions if viewer_session.id == session_id),
+        None,
+    )
+    if not session:
+        raise HTTPException(status_code=404, detail="Viewer session not found.")
+
+    state.viewer_sessions = [
+        viewer_session
+        for viewer_session in state.viewer_sessions
+        if viewer_session.id != session_id
+    ]
+    ledger_entry = LedgerEntry(
+        type="viewer_logged_out",
+        detail=f"{session.username} logged out of the viewer room.",
+        payload={"session_id": session.id, "username": session.username},
+    )
+    state.ledger = [ledger_entry, *state.ledger][:200]
+    updated_state = commerce_store.replace(state)
+    return ViewerLoginResponse(session=session, state=updated_state)
 
 
 @app.post("/actions/{pending_action_id}/approve", response_model=WorkflowResponse)
@@ -285,9 +348,24 @@ def get_media_session(session_id: str):
     return session
 
 
+@app.post("/media/session/{session_id}/viewer/{viewer_id}")
+def join_media_session(session_id: str, viewer_id: str):
+    session = media_store.add_viewer(session_id, viewer_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Media session not found.")
+    return session
+
+
 @app.post("/media/session/{session_id}/offer")
 def set_media_offer(session_id: str, signal: SignalPayload):
-    session = media_store.set_offer(session_id, signal.payload)
+    if signal.viewer_id:
+        session = media_store.set_viewer_offer(
+            session_id,
+            signal.viewer_id,
+            signal.payload,
+        )
+    else:
+        session = media_store.set_offer(session_id, signal.payload)
     if not session:
         raise HTTPException(status_code=404, detail="Media session not found.")
     return session
@@ -295,7 +373,14 @@ def set_media_offer(session_id: str, signal: SignalPayload):
 
 @app.post("/media/session/{session_id}/answer")
 def set_media_answer(session_id: str, signal: SignalPayload):
-    session = media_store.set_answer(session_id, signal.payload)
+    if signal.viewer_id:
+        session = media_store.set_viewer_answer(
+            session_id,
+            signal.viewer_id,
+            signal.payload,
+        )
+    else:
+        session = media_store.set_answer(session_id, signal.payload)
     if not session:
         raise HTTPException(status_code=404, detail="Media session not found.")
     return session
@@ -303,7 +388,12 @@ def set_media_answer(session_id: str, signal: SignalPayload):
 
 @app.post("/media/session/{session_id}/ice-candidate")
 def add_media_candidate(session_id: str, signal: SignalPayload):
-    session = media_store.add_candidate(session_id, signal.role, signal.payload)
+    session = media_store.add_candidate(
+        session_id,
+        signal.role,
+        signal.payload,
+        signal.viewer_id,
+    )
     if not session:
         raise HTTPException(status_code=404, detail="Media session not found.")
     return session

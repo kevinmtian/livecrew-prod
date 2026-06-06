@@ -54,6 +54,7 @@ export type BackendState = {
     duration_seconds: number;
     created_at: string;
   } | null;
+  viewer_sessions: ViewerSession[];
   orders: Array<{
     id: string;
     sku_id: string;
@@ -72,6 +73,17 @@ export type BackendState = {
     created_at: string;
   }>;
   updated_at: string;
+};
+
+export type ViewerSession = {
+  id: string;
+  username: string;
+  created_at: string;
+};
+
+export type ViewerLoginResponse = {
+  session: ViewerSession;
+  state: BackendState;
 };
 
 export type WorkflowResponse = {
@@ -131,6 +143,11 @@ export type MediaSession = {
   answer: RTCSessionDescriptionInit | null;
   host_candidates: RTCIceCandidateInit[];
   viewer_candidates: RTCIceCandidateInit[];
+  viewer_offers: Record<string, RTCSessionDescriptionInit>;
+  viewer_answers: Record<string, RTCSessionDescriptionInit>;
+  viewer_host_candidates: Record<string, RTCIceCandidateInit[]>;
+  viewer_ice_candidates: Record<string, RTCIceCandidateInit[]>;
+  viewer_ids: string[];
 };
 
 export type RealtimeTranscriptionToken = {
@@ -195,6 +212,23 @@ export function sendViewerMessage(text: string, viewer = "viewer") {
   return requestJson<WorkflowResponse>("/events/viewer-message", {
     method: "POST",
     body: JSON.stringify({ text, viewer }),
+  });
+}
+
+export function loginViewer(username: string) {
+  return requestJson<ViewerLoginResponse>("/viewer-login", {
+    method: "POST",
+    body: JSON.stringify({ username }),
+  });
+}
+
+export function fetchViewerLogin(sessionId: string) {
+  return requestJson<ViewerLoginResponse>(`/viewer-login/${sessionId}`);
+}
+
+export function logoutViewer(sessionId: string) {
+  return requestJson<ViewerLoginResponse>(`/viewer-login/${sessionId}/logout`, {
+    method: "POST",
   });
 }
 
@@ -265,21 +299,38 @@ export function fetchMediaSession(sessionId: string) {
   return requestJson<MediaSession>(`/media/session/${sessionId}`);
 }
 
+export function joinMediaSession(sessionId: string, viewerId: string) {
+  return requestJson<MediaSession>(
+    `/media/session/${sessionId}/viewer/${viewerId}`,
+    {
+      method: "POST",
+    },
+  );
+}
+
 export function fetchLatestMediaSession() {
   return requestJson<MediaSession>("/media/session/latest");
 }
 
-export function postMediaOffer(sessionId: string, offer: RTCSessionDescriptionInit) {
+export function postMediaOffer(
+  sessionId: string,
+  offer: RTCSessionDescriptionInit,
+  viewerId?: string,
+) {
   return requestJson<MediaSession>(`/media/session/${sessionId}/offer`, {
     method: "POST",
-    body: JSON.stringify({ role: "host", payload: offer }),
+    body: JSON.stringify({ role: "host", payload: offer, viewer_id: viewerId }),
   });
 }
 
-export function postMediaAnswer(sessionId: string, answer: RTCSessionDescriptionInit) {
+export function postMediaAnswer(
+  sessionId: string,
+  answer: RTCSessionDescriptionInit,
+  viewerId?: string,
+) {
   return requestJson<MediaSession>(`/media/session/${sessionId}/answer`, {
     method: "POST",
-    body: JSON.stringify({ role: "viewer", payload: answer }),
+    body: JSON.stringify({ role: "viewer", payload: answer, viewer_id: viewerId }),
   });
 }
 
@@ -287,10 +338,11 @@ export function postIceCandidate(
   sessionId: string,
   role: "host" | "viewer",
   candidate: RTCIceCandidateInit,
+  viewerId?: string,
 ) {
   return requestJson<MediaSession>(`/media/session/${sessionId}/ice-candidate`, {
     method: "POST",
-    body: JSON.stringify({ role, payload: candidate }),
+    body: JSON.stringify({ role, payload: candidate, viewer_id: viewerId }),
   });
 }
 
