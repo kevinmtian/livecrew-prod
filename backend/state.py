@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from threading import Lock
 
-from backend.data.catalogue import DEFAULT_ACTIVE_SKU_ID, SEED_CATALOGUE
+from backend.data.catalogue import SEED_CATALOGUE
 from backend.models import CommerceState, LedgerEntry, utc_now
 
 
@@ -14,12 +14,12 @@ class CommerceStore:
 
     def _create_default_state(self) -> CommerceState:
         return CommerceState(
-            active_sku_id=DEFAULT_ACTIVE_SKU_ID,
+            active_sku_id=None,
             skus=deepcopy(SEED_CATALOGUE),
             ledger=[
                 LedgerEntry(
                     type="backend_ready",
-                    detail="Python FastAPI + LangGraph backend initialized.",
+                    detail="Python FastAPI + LangGraph backend initialized with an empty product shelf.",
                 )
             ],
         )

@@ -1,7 +1,6 @@
 "use client";
 
 import { StatusPill } from "@/components/dashboard";
-import { defaultActiveSkuId, getActiveSkuDisplay } from "@/lib/catalogue";
 import {
   appendAgentReply,
   appendViewerMessage,
@@ -45,14 +44,14 @@ const initialReplies: RoomReply[] = [
     id: "reply-host-001",
     sender: "Host",
     message:
-      "We are featuring GlowFix first. I will keep the product card updated as we move through the shelf.",
+      "The shelf is ready. I will mount the first product card once we start the live demo.",
     tone: "host",
   },
   {
     id: "reply-agent-001",
     sender: "LiveCrew Agent",
     message:
-      "GlowFix Vitamin C Serum is a 30 ml brightening serum designed for morning skincare routines.",
+      "LiveCrew is standing by for the host to list the first SKU.",
     tone: "agent",
   },
 ];
@@ -122,7 +121,6 @@ export default function ViewerPage() {
   const [connectionStatus, setConnectionStatus] = useState<
     "offline" | "connecting" | "live"
   >("offline");
-  const [streamError, setStreamError] = useState("");
   const [backendState, setBackendState] = useState<BackendState | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [messageStatus, setMessageStatus] = useState<"idle" | "sending">("idle");
@@ -148,21 +146,18 @@ export default function ViewerPage() {
   const viewerSessionIdRef = useRef<string | null>(null);
   const couponTimerRef = useRef<number | null>(null);
 
-  const fallbackProduct = getActiveSkuDisplay(
-    backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
-  );
   const backendActiveSkuId = backendState?.active_sku_id ?? null;
   const activeBackendSku = backendState?.skus.find(
     (sku) => sku.id === backendActiveSkuId,
   );
-  const displayProduct = {
-    name: activeBackendSku?.name ?? fallbackProduct.name,
-    price: activeBackendSku
-      ? formatPrice(activeBackendSku.price_cents)
-      : fallbackProduct.price,
-    stock: activeBackendSku?.stock ?? fallbackProduct.stock,
-    facts: activeBackendSku?.facts ?? fallbackProduct.facts,
-  };
+  const displayProduct = activeBackendSku
+    ? {
+        name: activeBackendSku.name,
+        price: formatPrice(activeBackendSku.price_cents),
+        stock: activeBackendSku.stock,
+        facts: activeBackendSku.facts,
+      }
+    : null;
   const activeFlashSale =
     backendState?.flash_sale?.sku_id === backendActiveSkuId
       ? backendState.flash_sale
@@ -174,33 +169,19 @@ export default function ViewerPage() {
     Boolean(activeFlashSale) &&
     flashSaleSecondsLeft > 0 &&
     (activeFlashSale?.remaining_stock ?? 0) > 0;
-  const currentUnitPrice = isFlashSaleActive && activeFlashSale
-    ? activeFlashSale.sale_price_cents
-    : activeBackendSku?.price_cents;
   const getSkuUnitPriceCents = (sku: { id: string; price_cents: number }) =>
     isFlashSaleActive && activeFlashSale?.sku_id === sku.id
       ? activeFlashSale.sale_price_cents
       : sku.price_cents;
-  const productShelf = backendState?.skus.length
+  const productShelf = backendState?.skus.length && backendActiveSkuId
     ? [
         ...backendState.skus.filter((sku) => sku.id === backendActiveSkuId),
         ...backendState.skus.filter((sku) => sku.id !== backendActiveSkuId),
       ]
-    : activeBackendSku
-      ? [activeBackendSku]
-      : [
-          {
-            id: fallbackProduct.id,
-            name: fallbackProduct.name,
-            aliases: fallbackProduct.aliases,
-            price_cents: currentUnitPrice ?? 0,
-            stock: fallbackProduct.stock,
-            facts: fallbackProduct.facts,
-            base_price_cents: currentUnitPrice ?? 0,
-          },
-        ];
-  const activeProductImage =
-    skuImages[productShelf[0]?.id ?? backendActiveSkuId ?? fallbackProduct.id];
+    : [];
+  const activeProductImage = backendActiveSkuId
+    ? skuImages[backendActiveSkuId]
+    : undefined;
   const cartCount = Object.values(cartItems).reduce(
     (total, quantity) => total + quantity,
     0,
@@ -221,6 +202,8 @@ export default function ViewerPage() {
   const discountedCartTotalCents = Math.max(0, cartTotalCents - couponDiscountCents);
   const discountedCartTotal =
     discountedCartTotalCents > 0 ? formatPrice(discountedCartTotalCents) : null;
+  const isHostLive =
+    connectionStatus === "live" && roomState.hostStreamStatus === "live";
   const checkoutLines = productShelf
     .map((sku) => ({
       sku,
@@ -261,7 +244,6 @@ export default function ViewerPage() {
     }
 
     setConnectionStatus("connecting");
-    setStreamError("");
 
     try {
       const session = await fetchLatestMediaSession();
@@ -289,7 +271,6 @@ export default function ViewerPage() {
 
       if (!viewerOffer) {
         setConnectionStatus("offline");
-        setStreamError("Host has not prepared a viewer stream yet. Tap Connect again.");
         return;
       }
 
@@ -352,18 +333,12 @@ export default function ViewerPage() {
         } catch {
           closeViewerPeer();
           setConnectionStatus("offline");
-          setStreamError("Host stream session ended. Waiting for a new stream.");
           return;
         }
       }, 1000);
-    } catch (error) {
+    } catch {
       setConnectionStatus("offline");
       closeViewerPeer();
-      setStreamError(
-        error instanceof Error
-          ? error.message
-          : "Unable to connect to host stream.",
-      );
     }
   }, [closeViewerPeer, viewerSession]);
 
@@ -662,16 +637,16 @@ export default function ViewerPage() {
               <p className="text-xs font-semibold uppercase tracking-wide text-white/70">
                 {viewerSession.username}
               </p>
-              <p className="text-sm font-semibold">Customer live room</p>
+              <p className="text-sm font-semibold">Live room</p>
             </div>
             <div className="flex items-center gap-2">
               <span
                 className={`h-2.5 w-2.5 rounded-full ${
-                  connectionStatus === "live" ? "bg-emerald-400" : "bg-amber-300"
+                  isHostLive ? "bg-emerald-400" : "bg-amber-300"
                 }`}
               />
               <span className="text-xs font-medium capitalize">
-                {connectionStatus}
+                {isHostLive ? "live" : "offline"}
               </span>
               <button
                 className="rounded-md border border-white/20 px-2 py-1 text-xs font-semibold text-white/85 transition hover:bg-white/10"
@@ -683,31 +658,13 @@ export default function ViewerPage() {
             </div>
           </div>
 
-          {connectionStatus !== "live" ? (
+          {!isHostLive ? (
             <div className="absolute inset-0 flex items-center justify-center px-6 text-center">
-              <div>
-                <p className="text-base font-semibold text-white">
-                  Host stream is {connectionStatus}
-                </p>
-                <p className="mt-2 text-sm leading-6 text-white/70">
-                  Start the stream from the host cockpit, then connect here.
-                </p>
-                <button
-                  className="mt-4 min-h-10 rounded-md border border-white/20 bg-white px-4 text-sm font-semibold text-slate-900 transition hover:bg-slate-100"
-                  onClick={() => void connectToLatestStream()}
-                  type="button"
-                >
-                  Connect
-                </button>
-                {streamError ? (
-                  <p className="mt-3 text-xs leading-5 text-amber-200">
-                    {streamError}
-                  </p>
-                ) : null}
-              </div>
+              <p className="text-lg font-semibold text-white">Not live</p>
             </div>
           ) : null}
 
+          {displayProduct ? (
           <div className="absolute inset-x-3 bottom-3 rounded-md border border-white/15 bg-white/92 p-3 shadow-sm backdrop-blur">
             {!cartOpen ? (
               <>
@@ -926,6 +883,7 @@ export default function ViewerPage() {
               </div>
             ) : null}
           </div>
+          ) : null}
         </section>
 
         <section className="flex min-h-0 flex-1 flex-col border-t border-slate-200 bg-white">

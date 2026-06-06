@@ -254,6 +254,7 @@ class CommerceState(BaseModel):
 Important rules:
 
 - `active_sku_id` represents the product currently displayed in the live room.
+- Startup and reset set `active_sku_id` to `null`; the backend must not mount a default SKU before the host lists one.
 - SKU stock and prices are backend source of truth.
 - Viewer sessions store active username-only logins for the current demo run.
 - Viewer comments are backend source of truth for ConciergeAgent replies and host word-cloud analysis.
@@ -282,6 +283,9 @@ Examples:
 "Set the tumbler stock to 60."
 -> update_stock for Bamboo Thermal Tumbler
 
+"Set talk to 100." when Bamboo Thermal Tumbler is active
+-> update_stock for Bamboo Thermal Tumbler
+
 "Restore the sunscreen cushion to original price."
 -> restore_price for HydraMist Cushion SPF
 
@@ -303,6 +307,7 @@ CoHost conversation context:
 
 - The backend maintains an ordered CoHost `messages` list for host operations. The list contains one system prompt message, host user messages, and assistant action-trace messages.
 - The system prompt is refreshed on each CoHost call and injects the seeded SKU catalogue, current backend commerce state, and supported action list/tool schema. SKU, price, stock, flash-sale, pending-action, and supported-action facts should come from backend state and constants, not from a stale summary.
+- The system prompt instructs CoHostAgent to account for minor speech-transcription noise in commerce terms, such as "talk" for "stock", only when the inferred correction maps cleanly to a supported action with complete required fields and a grounded SKU.
 - Each finalized speech transcript or typed debug command is appended as the latest user message, then the CoHost model is called with the full bounded message list.
 - If the CoHost output is only `noop`, the backend does not append a durable assistant trace. The next host user message is merged into the previous open user message, preserving time order, and the merged message is re-analyzed.
 - Incomplete high-risk tool calls such as `update_price`, `update_stock`, or `create_flash_sale` with missing required fields are coerced to `noop` before assistant tracing, so partial transcript fragments keep accumulating instead of closing the host user message.
@@ -473,6 +478,7 @@ Output:
 Responsibilities:
 
 - Understand host operating intent from natural transcript.
+- Infer likely host intent through minor transcription errors in commerce keywords when context strongly supports one corrected command.
 - Split a transcript into one or more proposed actions.
 - Use OpenAI structured output as the primary extraction path for host operations, including multilingual and mixed-language phrasing.
 - Resolve explicit product mentions using shared SKU tools.
@@ -982,7 +988,7 @@ Frontend behavior:
 - `/viewer` renders the customer experience as a phone-style livestream room.
 - `/viewer` reserves the upper two-thirds of the phone frame for host video and product information.
 - `/viewer` reserves the lower one-third of the phone frame for viewer chat.
-- Active product information displayed on `/viewer` must come from backend `active_sku_id` and SKU facts, with local demo state only as fallback.
+- Active product information displayed on `/viewer` must come from backend `active_sku_id` and SKU facts, with local demo state only as fallback when the backend is unavailable; a backend `null` active SKU renders an empty shelf rather than a default SKU.
 - Viewer media playback should clearly show connecting, live, muted, offline, and permission/error states.
 - Host audio should be reusable for OpenAI realtime transcription and viewer playback.
 

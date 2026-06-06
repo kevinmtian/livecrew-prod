@@ -1,6 +1,5 @@
 import {
   type SkuId,
-  defaultActiveSkuId,
   resolveSkuById,
 } from "@/lib/catalogue";
 
@@ -25,7 +24,7 @@ export type LocalMonitorSignal = {
 };
 
 export type LocalRoomState = {
-  activeSkuId: SkuId;
+  activeSkuId: SkuId | null;
   viewerMessages: RoomMessage[];
   replies: RoomMessage[];
   monitorSignal: LocalMonitorSignal | null;
@@ -39,7 +38,7 @@ const ROOM_EVENT_NAME = "livecrew:local-room-updated";
 const MAX_MESSAGES = 80;
 
 export const defaultLocalRoomState: LocalRoomState = {
-  activeSkuId: defaultActiveSkuId,
+  activeSkuId: null,
   viewerMessages: [],
   replies: [],
   monitorSignal: null,
@@ -138,7 +137,7 @@ export function readLocalRoomState(): LocalRoomState {
     const activeSku = resolveSkuById(parsedState.activeSkuId);
 
     return {
-      activeSkuId: activeSku?.id ?? defaultActiveSkuId,
+      activeSkuId: activeSku?.id ?? null,
       viewerMessages: normalizeMessages(parsedState.viewerMessages),
       replies: normalizeMessages(parsedState.replies),
       monitorSignal: normalizeMonitorSignal(parsedState.monitorSignal),
@@ -200,7 +199,7 @@ export function subscribeToLocalRoom(onChange: () => void) {
   };
 }
 
-export function setRoomActiveSku(activeSkuId: SkuId) {
+export function setRoomActiveSku(activeSkuId: SkuId | null) {
   writeLocalRoomState((currentState) => ({
     ...currentState,
     activeSkuId,
