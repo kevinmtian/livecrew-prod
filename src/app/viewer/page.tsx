@@ -36,6 +36,10 @@ type RoomReply = {
   tone: "host" | "agent";
 };
 
+type ExclusiveCoupon = {
+  percent: number;
+};
+
 const initialReplies: RoomReply[] = [
   {
     id: "reply-host-001",
@@ -74,6 +78,10 @@ const skuImages: Record<string, { src: string; alt: string }> = {
 
 function formatPrice(priceCents: number) {
   return `$${(priceCents / 100).toFixed(2)}`;
+}
+
+function getRandomCouponPercent() {
+  return Math.floor(Math.random() * 6) + 5;
 }
 
 function CartIcon() {
@@ -127,6 +135,9 @@ export default function ViewerPage() {
   const [cartItems, setCartItems] = useState<Record<string, number>>({});
   const [checkoutConfirmOpen, setCheckoutConfirmOpen] = useState(false);
   const [checkoutStatus, setCheckoutStatus] = useState<"idle" | "submitting">("idle");
+  const [exclusiveCoupon, setExclusiveCoupon] = useState<ExclusiveCoupon | null>(null);
+  const [couponPromptOpen, setCouponPromptOpen] = useState(false);
+  const [couponDismissConfirmOpen, setCouponDismissConfirmOpen] = useState(false);
 
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const chatListRef = useRef<HTMLDivElement | null>(null);
@@ -135,6 +146,7 @@ export default function ViewerPage() {
   const hostCandidateCountRef = useRef(0);
   const pollRef = useRef<number | null>(null);
   const viewerSessionIdRef = useRef<string | null>(null);
+  const couponTimerRef = useRef<number | null>(null);
 
   const fallbackProduct = getActiveSkuDisplay(
     backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
@@ -199,6 +211,16 @@ export default function ViewerPage() {
     return total + quantity * unitPrice;
   }, 0);
   const cartTotal = cartTotalCents > 0 ? formatPrice(cartTotalCents) : null;
+  const couponDiscountCents =
+    exclusiveCoupon && cartTotalCents > 0
+      ? Math.min(
+          Math.round((cartTotalCents * exclusiveCoupon.percent) / 100),
+          Math.round(cartTotalCents * 0.1),
+        )
+      : 0;
+  const discountedCartTotalCents = Math.max(0, cartTotalCents - couponDiscountCents);
+  const discountedCartTotal =
+    discountedCartTotalCents > 0 ? formatPrice(discountedCartTotalCents) : null;
   const checkoutLines = productShelf
     .map((sku) => ({
       sku,
@@ -417,6 +439,40 @@ export default function ViewerPage() {
     });
   }, [roomState.updatedAt, messageStatus]);
 
+  useEffect(() => {
+    if (cartCount <= 0) {
+      if (couponTimerRef.current) {
+        window.clearTimeout(couponTimerRef.current);
+        couponTimerRef.current = null;
+      }
+      const clearCouponId = window.setTimeout(() => {
+        setExclusiveCoupon(null);
+        setCouponPromptOpen(false);
+        setCouponDismissConfirmOpen(false);
+      }, 0);
+      return () => window.clearTimeout(clearCouponId);
+    }
+
+    if (exclusiveCoupon || couponTimerRef.current) {
+      return;
+    }
+
+    couponTimerRef.current = window.setTimeout(() => {
+      couponTimerRef.current = null;
+      setExclusiveCoupon({
+        percent: getRandomCouponPercent(),
+      });
+      setCouponPromptOpen(true);
+    }, 10000);
+
+    return () => {
+      if (couponTimerRef.current) {
+        window.clearTimeout(couponTimerRef.current);
+        couponTimerRef.current = null;
+      }
+    };
+  }, [cartCount, exclusiveCoupon]);
+
   async function handleSubmitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
@@ -493,6 +549,9 @@ export default function ViewerPage() {
       setCartItems({});
       setCartOpen(false);
       setCheckoutConfirmOpen(false);
+      setExclusiveCoupon(null);
+      setCouponPromptOpen(false);
+      setCouponDismissConfirmOpen(false);
       if (viewerSessionIdRef.current) {
         void syncBackendState();
       }
@@ -732,7 +791,7 @@ export default function ViewerPage() {
                     onClick={() => setCheckoutConfirmOpen(true)}
                     type="button"
                   >
-                    {cartTotal ? `Checkout ${cartTotal}` : "Checkout"}
+                    {discountedCartTotal ? `Checkout ${discountedCartTotal}` : "Checkout"}
                   </button>
                 </div>
                 {cartCount > 0 ? (
@@ -862,7 +921,7 @@ export default function ViewerPage() {
                   onClick={() => setCheckoutConfirmOpen(true)}
                   type="button"
                 >
-                  {cartTotal ? `Checkout ${cartTotal}` : "Checkout"}
+                  {discountedCartTotal ? `Checkout ${discountedCartTotal}` : "Checkout"}
                 </button>
               </div>
             ) : null}
@@ -975,6 +1034,85 @@ export default function ViewerPage() {
           ) : null}
         </section>
       </div>
+      {couponPromptOpen && exclusiveCoupon ? (
+        <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/35 p-3 sm:items-center">
+          <div className="w-full max-w-[360px] rounded-lg border border-teal-200 bg-white p-4 shadow-xl">
+            {couponDismissConfirmOpen ? (
+              <>
+                <div className="rounded-md border border-rose-100 bg-rose-50 px-3 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-rose-700">
+                    Give up your exclusive discount?
+                  </p>
+                  <p className="mt-1 text-2xl font-bold text-slate-950">
+                    You will lose {exclusiveCoupon.percent}% off
+                  </p>
+                  <p className="mt-2 text-sm leading-5 text-slate-700">
+                    This private offer will not be saved after you close it.
+                  </p>
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <button
+                    className="min-h-10 rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                    onClick={() => setCouponDismissConfirmOpen(false)}
+                    type="button"
+                  >
+                    Keep offer
+                  </button>
+                  <button
+                    className="min-h-10 rounded-md border border-rose-200 bg-white px-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-50"
+                    onClick={() => {
+                      setCouponDismissConfirmOpen(false);
+                      setCouponPromptOpen(false);
+                      setExclusiveCoupon(null);
+                    }}
+                    type="button"
+                  >
+                    Give up
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="flex justify-end">
+                  <button
+                    aria-label="Dismiss exclusive offer"
+                    className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-sm font-semibold text-slate-500 transition hover:border-slate-300 hover:bg-slate-50 hover:text-slate-900"
+                    onClick={() => setCouponDismissConfirmOpen(true)}
+                    type="button"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="rounded-md border border-teal-100 bg-teal-50 px-3 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-teal-700">
+                    Your exclusive offer
+                  </p>
+                  <p className="mt-1 text-3xl font-bold text-slate-950">
+                    {exclusiveCoupon.percent}% off
+                  </p>
+                  <p className="mt-2 text-sm leading-5 text-slate-700">
+                    This private checkout coupon is available right now. Use it before
+                    closing this offer, or the savings will be released.
+                  </p>
+                </div>
+                <div className="mt-3">
+                  <button
+                    className="min-h-10 w-full rounded-md bg-teal-700 px-3 text-sm font-semibold text-white transition hover:bg-teal-800"
+                    onClick={() => {
+                      setCouponPromptOpen(false);
+                      setCouponDismissConfirmOpen(false);
+                      setCheckoutConfirmOpen(true);
+                    }}
+                    type="button"
+                  >
+                    Apply offer
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
       {checkoutConfirmOpen ? (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 p-3 sm:items-center">
           <div className="w-full max-w-[400px] rounded-lg border border-slate-200 bg-white p-4 shadow-xl">
@@ -1033,9 +1171,24 @@ export default function ViewerPage() {
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Total
                 </p>
-                <p className="mt-1 text-xl font-bold text-slate-950">
-                  {cartTotal ?? "$0.00"}
-                </p>
+                {exclusiveCoupon && couponDiscountCents > 0 ? (
+                  <div className="mt-1 space-y-1">
+                    <p className="text-sm text-slate-500 line-through">
+                      {cartTotal ?? "$0.00"}
+                    </p>
+                    <p className="text-xs font-semibold text-teal-700">
+                      Exclusive coupon -{exclusiveCoupon.percent}% (
+                      {formatPrice(couponDiscountCents)})
+                    </p>
+                    <p className="text-xl font-bold text-slate-950">
+                      {discountedCartTotal ?? "$0.00"}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xl font-bold text-slate-950">
+                    {cartTotal ?? "$0.00"}
+                  </p>
+                )}
               </div>
               <button
                 className="min-h-10 rounded-md bg-teal-700 px-4 text-sm font-semibold text-white transition hover:bg-teal-800 disabled:bg-slate-300"
