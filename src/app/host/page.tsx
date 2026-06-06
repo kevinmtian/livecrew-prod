@@ -36,6 +36,7 @@ import {
   subscribeToLocalRoom,
 } from "@/lib/local-room";
 import { mockChat } from "@/lib/mock-data";
+import { buildProducerReport } from "@/lib/producer-report";
 import {
   type FormEvent,
   useCallback,
@@ -209,6 +210,15 @@ export default function HostPage() {
   const backendOrderGroups = useMemo(
     () => groupOrdersBySku(backendState),
     [backendState],
+  );
+  const producerReport = useMemo(
+    () =>
+      buildProducerReport({
+        backendState,
+        queueItems,
+        localLedgerEvents: ledgerEvents,
+      }),
+    [backendState, ledgerEvents, queueItems],
   );
 
   useEffect(() => {
@@ -1071,11 +1081,166 @@ export default function HostPage() {
               </div>
             </div>
           </Panel>
-          <Panel title="Producer Report" eyebrow="Placeholder">
-            <p className="text-sm leading-6 text-slate-600">
-              The final report will cite ledger events and backend commerce
-              numbers after those systems exist.
-            </p>
+          <Panel title="Producer Report" eyebrow="Generated">
+            <div className="space-y-4">
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Listed SKUs
+                </p>
+                {producerReport.listedSkus.length > 0 ? (
+                  <div className="mt-2 space-y-2">
+                    {producerReport.listedSkus.map((sku) => (
+                      <div
+                        className="rounded-md border border-slate-200 bg-white p-2 text-sm"
+                        key={sku.skuId}
+                      >
+                        <p className="font-semibold text-slate-900">
+                          {sku.name}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-600">
+                          Evidence: {sku.sourceEvents.join(", ")}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-2 text-sm text-slate-600">
+                    No backend list_product or create_flash_sale events yet.
+                  </p>
+                )}
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Units sold
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-slate-900">
+                    {producerReport.totalUnitsSold}
+                  </p>
+                </div>
+                <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Total GMV
+                  </p>
+                  <p className="mt-1 text-lg font-semibold text-slate-900">
+                    {formatMoney(producerReport.totalGmv)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Per-product KPI
+                </p>
+                {producerReport.perProduct.length > 0 ? (
+                  producerReport.perProduct.map((item) => (
+                    <div
+                      className="grid gap-1 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm sm:grid-cols-[1fr_auto_auto]"
+                      key={item.skuId}
+                    >
+                      <p className="font-semibold text-slate-900">
+                        {item.name}
+                      </p>
+                      <p className="text-slate-600">{item.units} units</p>
+                      <p className="font-semibold text-slate-900">
+                        {formatMoney(item.gmv)} GMV
+                      </p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    No backend order KPIs yet.
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">
+                  Flash-sale sell-through
+                </p>
+                {producerReport.flashSaleSellThrough ? (
+                  <p className="mt-2 text-sm leading-6 text-amber-900">
+                    {producerReport.flashSaleSellThrough.label}:{" "}
+                    {producerReport.flashSaleSellThrough.sold}/
+                    {producerReport.flashSaleSellThrough.quantity} sold (
+                    {producerReport.flashSaleSellThrough.percent}%)
+                  </p>
+                ) : (
+                  <p className="mt-2 text-sm text-amber-900">
+                    No active backend flash sale.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Questions handled
+                </p>
+                {producerReport.questionsHandled.length > 0 ? (
+                  producerReport.questionsHandled.slice(0, 5).map((question) => (
+                    <p
+                      className="rounded-md border border-slate-200 bg-slate-50 p-2 text-sm leading-6 text-slate-700"
+                      key={question}
+                    >
+                      {question}
+                    </p>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    No product questions handled yet.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Risk events
+                </p>
+                {producerReport.riskEvents.length > 0 ? (
+                  producerReport.riskEvents.slice(0, 5).map((event) => (
+                    <p
+                      className="rounded-md border border-amber-200 bg-amber-50 p-2 text-sm leading-6 text-amber-900"
+                      key={event}
+                    >
+                      {event}
+                    </p>
+                  ))
+                ) : (
+                  <p className="text-sm text-slate-600">
+                    No risk events recorded yet.
+                  </p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Host learning
+                </p>
+                {producerReport.hostLearning.map((item) => (
+                  <p
+                    className="rounded-md border border-slate-200 bg-slate-50 p-2 text-sm leading-6 text-slate-700"
+                    key={item}
+                  >
+                    {item}
+                  </p>
+                ))}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Next recommendations
+                </p>
+                {producerReport.nextRecommendations.map((item) => (
+                  <p
+                    className="rounded-md border border-slate-200 bg-slate-50 p-2 text-sm leading-6 text-slate-700"
+                    key={item}
+                  >
+                    {item}
+                  </p>
+                ))}
+              </div>
+            </div>
           </Panel>
         </div>
       </div>
