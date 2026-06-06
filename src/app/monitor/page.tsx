@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AppShell, Panel, StatusPill } from "@/components/dashboard";
 import {
   fetchLiveMetrics,
@@ -124,6 +124,8 @@ export default function MonitorPage() {
   const [response, setResponse] = useState<MonitorResponse | null>(null);
   const [history, setHistory] = useState<MonitorResponse[]>([]);
   const [status, setStatus] = useState("idle");
+  const monitorRunningRef = useRef(false);
+  const latestPayloadRef = useRef(payload);
 
   useEffect(() => {
     async function syncLiveMetrics() {
@@ -133,6 +135,10 @@ export default function MonitorPage() {
           ...current,
           online_viewers: metrics.online_viewers,
           online_viewers_delta: metrics.online_viewers_delta,
+          gpm_cents: metrics.gpm_cents,
+          gpm_delta: metrics.gpm_delta,
+          conversion_rate: metrics.conversion_rate,
+          conversion_rate_delta: metrics.conversion_rate_delta,
           comment_sentiment: metrics.comment_sentiment,
           interaction_rate: metrics.interaction_rate,
           intent_distribution: metrics.intent_distribution,
@@ -148,6 +154,20 @@ export default function MonitorPage() {
     void syncLiveMetrics();
     const intervalId = window.setInterval(syncLiveMetrics, 3000);
     return () => window.clearInterval(intervalId);
+  }, []);
+
+  useEffect(() => {
+    latestPayloadRef.current = payload;
+  }, [payload]);
+
+  useEffect(() => {
+    void runMonitor(latestPayloadRef.current, { recordHistory: false });
+    const intervalId = window.setInterval(() => {
+      void runMonitor(latestPayloadRef.current, { recordHistory: false });
+    }, 5000);
+    return () => window.clearInterval(intervalId);
+    // latestPayloadRef keeps this interval on fresh metrics without rebuilding it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const metricCards = useMemo(
@@ -195,6 +215,10 @@ export default function MonitorPage() {
       ...nextPayload,
       online_viewers: liveMetrics.online_viewers,
       online_viewers_delta: liveMetrics.online_viewers_delta,
+      gpm_cents: liveMetrics.gpm_cents,
+      gpm_delta: liveMetrics.gpm_delta,
+      conversion_rate: liveMetrics.conversion_rate,
+      conversion_rate_delta: liveMetrics.conversion_rate_delta,
       comment_sentiment: liveMetrics.comment_sentiment,
       interaction_rate: Math.max(nextPayload.interaction_rate, liveMetrics.interaction_rate),
       intent_distribution: liveMetrics.intent_distribution,
@@ -204,7 +228,14 @@ export default function MonitorPage() {
     };
   }
 
-  async function runMonitor(nextPayload = payload) {
+  async function runMonitor(
+    nextPayload = payload,
+    options: { recordHistory?: boolean } = {},
+  ) {
+    if (monitorRunningRef.current) {
+      return;
+    }
+    monitorRunningRef.current = true;
     setStatus("running");
     try {
       const livePayload = await getPayloadWithLiveViewers(nextPayload);
@@ -220,10 +251,14 @@ export default function MonitorPage() {
         script: result.hook.script,
         signals: result.signals,
       });
-      setHistory((current) => [result, ...current].slice(0, 8));
+      if (options.recordHistory ?? true) {
+        setHistory((current) => [result, ...current].slice(0, 8));
+      }
       setStatus("idle");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Monitor request failed");
+    } finally {
+      monitorRunningRef.current = false;
     }
   }
 
@@ -255,7 +290,7 @@ export default function MonitorPage() {
           onClick={() => void runMonitor()}
           type="button"
         >
-          运行监控判断
+          Run Monitor Now
         </button>
       </div>
 
