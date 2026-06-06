@@ -27,12 +27,15 @@ from backend.models import (
     MonitorSignalRequest,
     TextEventRequest,
     TranscriptionResponse,
+    ViewerHeartbeatRequest,
     ViewerLoginRequest,
     ViewerLoginResponse,
     ViewerMessageRequest,
+    ViewerMetricEventRequest,
     ViewerSession,
     WorkflowResponse,
 )
+from backend.metrics import live_metrics_store
 from backend.openai_client import (
     create_realtime_transcription_token,
     exchange_realtime_transcription_offer,
@@ -71,6 +74,7 @@ def get_state():
 
 @app.post("/reset")
 def reset_state():
+    live_metrics_store.reset()
     return commerce_store.reset()
 
 
@@ -204,6 +208,30 @@ def viewer_message(request: ViewerMessageRequest):
     return run_concierge_workflow(request.text.strip(), request.viewer.strip() or "viewer")
 
 
+@app.post("/events/monitor-signal", response_model=MonitorResponse)
+def monitor_signal(request: MonitorSignalRequest):
+    return analyze_monitor_signals(request, commerce_store.get())
+
+
+@app.get("/metrics/live", response_model=MonitorSignalRequest)
+def live_metrics():
+    return live_metrics_store.snapshot()
+
+
+@app.post("/metrics/viewer-heartbeat", response_model=MonitorSignalRequest)
+def viewer_heartbeat(request: ViewerHeartbeatRequest):
+    return live_metrics_store.record_viewer_heartbeat(request.session_id)
+
+
+@app.post("/metrics/viewer-event", response_model=MonitorSignalRequest)
+def viewer_metric_event(request: ViewerMetricEventRequest):
+    return live_metrics_store.record_viewer_event(
+        request.session_id,
+        request.event_type,
+        request.text,
+    )
+
+
 def _send_edited_pending_reply(
     pending_action_id: str,
     request: PendingReplyRequest,
@@ -270,11 +298,6 @@ def _send_edited_pending_reply(
 @app.post("/actions/{pending_action_id}/reply")
 def reply_to_pending_action(pending_action_id: str, request: PendingReplyRequest):
     return _send_edited_pending_reply(pending_action_id, request)
-
-
-@app.post("/events/monitor-signal", response_model=MonitorResponse)
-def monitor_signal(request: MonitorSignalRequest):
-    return analyze_monitor_signals(request)
 
 
 @app.post("/events/transcribe-audio", response_model=TranscriptionResponse)

@@ -182,6 +182,20 @@ class MonitorSignalRequest(BaseModel):
     conversion_rate_delta: float
     comment_sentiment: float = Field(ge=0, le=1)
     interaction_rate: float = Field(ge=0)
+    intent_distribution: dict[str, int] = Field(default_factory=dict)
+    high_intent_density: float = Field(ge=0, default=0)
+    top_question: str | None = None
+    top_question_count: int = Field(ge=0, default=0)
+
+
+class ViewerHeartbeatRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+
+
+class ViewerMetricEventRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    event_type: Literal["message", "like", "order"] = "message"
+    text: str | None = None
 
 
 class MonitorScenario(BaseModel):
@@ -194,6 +208,7 @@ class MonitorScenario(BaseModel):
 class MonitorHook(BaseModel):
     id: Literal["suspense", "order_push", "benefit", "interaction"]
     label: str
+    host_cue: str | None = None
     script: str
 
 

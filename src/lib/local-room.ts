@@ -17,6 +17,7 @@ export type LocalMonitorSignal = {
   scenarioReason: string;
   urgency: "low" | "medium" | "high";
   hookLabel: string;
+  hostCue: string | null;
   script: string;
   signals: Record<string, string>;
   createdAt: number;
@@ -92,6 +93,11 @@ function normalizeMonitorSignal(value: unknown): LocalMonitorSignal | null {
     typeof candidate.scenarioLabel !== "string" ||
     typeof candidate.scenarioReason !== "string" ||
     typeof candidate.hookLabel !== "string" ||
+    !(
+      candidate.hostCue === null ||
+      typeof candidate.hostCue === "string" ||
+      typeof candidate.hostCue === "undefined"
+    ) ||
     typeof candidate.script !== "string" ||
     typeof candidate.createdAt !== "number" ||
     !candidate.signals ||
@@ -102,7 +108,10 @@ function normalizeMonitorSignal(value: unknown): LocalMonitorSignal | null {
     return null;
   }
 
-  return candidate;
+  return {
+    ...candidate,
+    hostCue: candidate.hostCue ?? null,
+  };
 }
 
 export function readLocalRoomState(): LocalRoomState {

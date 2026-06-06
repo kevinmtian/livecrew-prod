@@ -21,7 +21,9 @@ import {
   logoutViewer,
   postIceCandidate,
   postMediaAnswer,
+  sendViewerHeartbeat,
   sendViewerMessage,
+  sendViewerMetricEvent,
 } from "@/lib/livecrew-api";
 import { mockChat } from "@/lib/mock-data";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
@@ -89,6 +91,7 @@ export default function ViewerPage() {
   const sessionIdRef = useRef<string | null>(null);
   const hostCandidateCountRef = useRef(0);
   const pollRef = useRef<number | null>(null);
+  const viewerSessionIdRef = useRef<string | null>(null);
 
   const fallbackProduct = getActiveSkuDisplay(
     backendState?.active_sku_id ?? roomState.activeSkuId ?? defaultActiveSkuId,
@@ -279,12 +282,24 @@ export default function ViewerPage() {
     const clockId = window.setInterval(() => {
       setNow(Date.now());
     }, 1000);
+    const heartbeatId = window.setInterval(() => {
+      if (!viewerSessionIdRef.current) {
+        viewerSessionIdRef.current = viewerSession.id;
+      }
+      void sendViewerHeartbeat(viewerSessionIdRef.current).catch(() => {});
+    }, 5000);
+
+    if (!viewerSessionIdRef.current) {
+      viewerSessionIdRef.current = viewerSession.id;
+    }
+    void sendViewerHeartbeat(viewerSessionIdRef.current).catch(() => {});
 
     return () => {
       unsubscribe();
       window.clearTimeout(initialSyncId);
       window.clearInterval(reconnectId);
       window.clearInterval(clockId);
+      window.clearInterval(heartbeatId);
       if (pollRef.current) {
         window.clearInterval(pollRef.current);
       }
@@ -300,8 +315,11 @@ export default function ViewerPage() {
       (session) => session.id === viewerSession.id,
     );
     if (!sessionStillActive) {
-      setViewerSession(null);
-      closeViewerPeer();
+      const timeoutId = window.setTimeout(() => {
+        setViewerSession(null);
+        closeViewerPeer();
+      }, 0);
+      return () => window.clearTimeout(timeoutId);
     }
   }, [backendState, closeViewerPeer, viewerSession]);
 
@@ -327,6 +345,13 @@ export default function ViewerPage() {
     }
 
     appendViewerMessage(trimmedMessage, viewerSession.username);
+    if (viewerSessionIdRef.current) {
+      void sendViewerMetricEvent(
+        viewerSessionIdRef.current,
+        "message",
+        trimmedMessage,
+      ).catch(() => {});
+    }
     setRoomState(readLocalRoomState());
     setMessageInput("");
     setMessageStatus("sending");
