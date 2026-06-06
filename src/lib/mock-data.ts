@@ -13,27 +13,6 @@ export const mockChat = [
   },
 ];
 
-export const mockLedgerEvents = [
-  {
-    id: "evt-001",
-    label: "Transcript scanned",
-    detail: "Detected possible mention: GlowFix serum",
-    status: "complete",
-  },
-  {
-    id: "evt-002",
-    label: "SKU selected",
-    detail: "Active shelf item set to GlowFix Vitamin C Serum",
-    status: "complete",
-  },
-  {
-    id: "evt-003",
-    label: "Guardrail ready",
-    detail: "Unverified discounts require host confirmation",
-    status: "watching",
-  },
-];
-
 export const mockEvaluations = [
   {
     category: "SKU Grounding",
