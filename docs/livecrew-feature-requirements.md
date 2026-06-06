@@ -154,6 +154,8 @@ Each capability should be inspectable and testable.
 Requirements:
 
 - Deterministic evaluation cases should exist for agent routing, SKU grounding, guardrail decisions, and commerce execution.
+- The `/agent_evaluation` page should run an isolated read-only suite through `/api/eval/run-agent-suite`, using local deterministic analyzer behavior without writing to live chat, host state, order state, backend ledger, or production queues.
+- Each `/agent_evaluation` category card should expand and collapse its own testing samples directly under that card, so summary cards and detailed case tables stay visually aligned. Each displayed evaluation category should include at least 10 representative and diverse samples covering common edge cases.
 - Ledger entries should explain why an action was applied, blocked, or escalated.
 - Internal `noop` decisions should not be shown in the host ledger because they are non-events, not evidence of an applied, blocked, or escalated commerce action.
 - Agent outputs should include confidence, reason, and evidence.
@@ -546,6 +548,7 @@ Expected behavior:
 - Escalations should show the viewer's raw question, escalation reason, ConciergeAgent drafted reply, and controls for the host to accept, edit and send, or discard the reply.
 - Viewer Q&A events should be recorded for analytics and report generation.
 - The host cockpit's Viewer Room / Host Reply area should show the reply record, including the original viewer question and automatic or host-approved reply when one is sent.
+- Viewer orders must preserve the exact intended quantity from chat text or cart checkout text. Explicit quantities override LLM extraction. Backend order records, stock decrement, host/viewer stock displays, and KPI/GMV reporting must all use the same backend order quantity.
 
 Acceptance criteria:
 
@@ -730,6 +733,7 @@ The frontend should include:
 - On desktop, Monitor Agent and CoHost Agent Event Timeline should sit side by side with matching width and height.
 - When the timeline is moved beside Monitor Agent, the host cockpit should use a wider desktop canvas instead of shrinking the existing module widths.
 - On desktop, the camera/microphone panel, CoHost Agent queue group, and ledger panel should share a clean lower alignment, with the live transcript expanding to fill available space.
+- Monitor Agent KPI labels should include short operator-facing explanations, and the host Monitor panel should refresh from live metrics so order activity and viewer intent do not leave stale hesitation labels or empty top-intent summaries.
 - Viewer room styled as a mobile livestream commerce room.
 - The viewer route should present the mobile livestream frame directly, without the shared dashboard header above it.
 - Viewer livestream area occupying the top two-thirds of the mobile room.
